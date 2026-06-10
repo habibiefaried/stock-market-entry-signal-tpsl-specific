@@ -16,13 +16,16 @@ pip install torch --index-url https://download.pytorch.org/whl/cu121
 # 1. Fetch data (9 years default)
 python fetch_stock_data.py --ticker AAPL
 
-# 2. Train model
+# 2. Train model (Optuna runs automatically, 100 trials by default)
 python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
+
+# 2b. More Optuna trials for better tuning
+python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --n-trials 200
 
 # 3. Train with Genetic Algorithm + LSTM/CNN features (best results)
 python train_xgboost_ga.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
 
-# 4. Generate HTML report with backtest + Monte Carlo
+# 4. Generate HTML report with backtest + Monte Carlo (Optuna runs inside)
 python generate_report.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
 
 # 5. Live trade decision
@@ -79,7 +82,35 @@ Given today's market conditions, should I enter LONG or SHORT to maximize my cha
 - Only uses scale-invariant features (no absolute prices that change over time)
 - Chronological train/test split (90/10) — never peeks at future
 - Auto-detects NVIDIA GPU (`device='cuda'`)
-- Optional Optuna Bayesian hyperparameter tuning (`--tune`)
+- **Optuna Bayesian hyperparameter tuning is mandatory** — always runs, no manual params needed
+
+#### What is Optuna?
+Optuna automatically finds the best hyperparameters by running many trials and learning from each result. It uses Bayesian optimization: each trial is informed by all previous trials, so it narrows in on good values faster than random or grid search.
+
+Each trial trains XGBoost with a different combination of parameters and scores it using walk-forward win rate. After 100 trials, it picks the best.
+
+**Parameters Optuna tunes (you never set these manually):**
+
+| Parameter | Search Range | What It Controls |
+|-----------|-------------|-----------------|
+| `n_estimators` | 500 – 5000 | Number of trees |
+| `learning_rate` | 0.005 – 0.1 | How much each tree contributes |
+| `max_depth` | 3 – 10 | Complexity of each tree |
+| `subsample` | 0.6 – 1.0 | Fraction of rows each tree sees |
+| `colsample_bytree` | 0.5 – 1.0 | Fraction of features each tree sees |
+| `min_child_weight` | 1 – 10 | Min samples required to split a node |
+| `gamma` | 0 – 5 | Min gain required to make a split |
+| `reg_alpha` | 0 – 10 | L1 regularization (sparsity) |
+| `reg_lambda` | 0 – 10 | L2 regularization (shrinkage) |
+
+**Usage:**
+```bash
+# Default: 100 trials (~5 min on CPU, ~1 min on GPU)
+python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
+
+# More trials for better results (~10 min on CPU)
+python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --n-trials 200
+```
 
 ### The GA Model (train_xgboost_ga.py) — Best Results
 - **Genetic Algorithm** evolves both feature selection AND hyperparameters
@@ -89,7 +120,8 @@ Given today's market conditions, should I enter LONG or SHORT to maximize my cha
 - Use `--no-deep` to skip LSTM/CNN if PyTorch has issues
 
 ### The Report (generate_report.py)
-- Trains model, runs backtest, runs 10,000 Monte Carlo simulations
+- Trains model with Optuna (same mandatory tuning as `train_xgboost.py`)
+- Runs backtest on test set, then runs 10,000 Monte Carlo simulations
 - Generates interactive HTML with Chart.js visualizations
 - Shows: verdict, equity curve, MC probability distribution, feature importance
 
