@@ -3,12 +3,12 @@ import numpy as np
 import json
 import xgboost as xgb
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import classification_report, accuracy_score
+from sklearn.metrics import accuracy_score, precision_score
 import joblib
 import os
 import argparse
 from datetime import datetime
-from train_xgboost import load_and_prepare
+from train_xgboost import load_and_prepare, optimize_hyperparams, detect_gpu
 
 
 def backtest(df, y_pred, y_prob):
@@ -375,18 +375,23 @@ def main():
     parser = argparse.ArgumentParser(description="Generate HTML report with backtest and Monte Carlo")
     parser.add_argument("--csv", type=str, required=True, help="Path to CSV from fetch_stock_data.py")
     parser.add_argument("--train-ratio", type=float, default=0.9, help="Train/test split ratio")
-    parser.add_argument("--n-estimators", type=int, default=2000, help="Number of trees")
-    parser.add_argument("--learning-rate", type=float, default=0.01, help="Learning rate")
-    parser.add_argument("--max-depth", type=int, default=7, help="Max tree depth")
+    parser.add_argument("--n-trials", type=int, default=100, help="Number of Optuna trials")
     parser.add_argument("--mc-simulations", type=int, default=10000, help="Monte Carlo simulations")
     parser.add_argument("--mc-trades", type=int, default=252, help="Trades per MC simulation")
     args = parser.parse_args()
 
     df, feature_cols = load_and_prepare(args.csv)
     ticker = os.path.basename(args.csv).split("_")[0]
+    device = detect_gpu()
 
     print(f"Training model for {ticker}...")
-    print(f"Samples: {len(df)} | Features: {len(feature_cols)}")
+    print(f"Samples: {len(df)} | Features: {len(feature_cols)} | Device: {device}")
+
+    # Optuna tuning (mandatory)
+    best_params = optimize_hyperparams(df, feature_cols, args.n_trials)
+    n_estimators = best_params.pop("n_estimators")
+    learning_rate = best_params.pop("learning_rate")
+    max_depth = best_params.pop("max_depth")
 
     # Chronological split
     split_idx = int(len(df) * args.train_ratio)
@@ -406,19 +411,27 @@ def main():
     n_short = len(y_train) - n_long
     scale_weight = n_short / n_long if n_long > 0 else 1.0
 
-    model = xgb.XGBClassifier(
-        n_estimators=args.n_estimators,
-        learning_rate=args.learning_rate,
-        max_depth=args.max_depth,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        scale_pos_weight=scale_weight,
-        objective="binary:logistic",
-        eval_metric="logloss",
-        use_label_encoder=False,
-        random_state=42,
-        early_stopping_rounds=50,
-    )
+    model_params = {
+        "n_estimators": n_estimators,
+        "learning_rate": learning_rate,
+        "max_depth": max_depth,
+        "subsample": best_params.get("subsample", 0.8),
+        "colsample_bytree": best_params.get("colsample_bytree", 0.8),
+        "min_child_weight": best_params.get("min_child_weight", 1),
+        "gamma": best_params.get("gamma", 0.0),
+        "reg_alpha": best_params.get("reg_alpha", 0.0),
+        "reg_lambda": best_params.get("reg_lambda", 1.0),
+        "scale_pos_weight": scale_weight,
+        "objective": "binary:logistic",
+        "eval_metric": "logloss",
+        "use_label_encoder": False,
+        "random_state": 42,
+        "early_stopping_rounds": 50,
+    }
+    if device != "cpu":
+        model_params["device"] = device
+
+    model = xgb.XGBClassifier(**model_params)
     model.fit(X_train_scaled, y_train, eval_set=[(X_test_scaled, y_test)], verbose=False)
 
     # Predictions on test set
@@ -426,7 +439,6 @@ def main():
     y_prob = model.predict_proba(X_test_scaled)
 
     accuracy = accuracy_score(y_test, y_pred) * 100
-    from sklearn.metrics import precision_score
     prec_long = precision_score(y_test, y_pred, pos_label=1, zero_division=0) * 100
     prec_short = precision_score(y_test, y_pred, pos_label=0, zero_division=0) * 100
 

@@ -11,9 +11,8 @@ from datetime import datetime
 try:
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    HAS_OPTUNA = True
 except ImportError:
-    HAS_OPTUNA = False
+    raise ImportError("optuna is required. Run: pip install optuna")
 
 
 def load_and_prepare(csv_path: str):
@@ -207,9 +206,7 @@ def detect_gpu():
     return "cpu"
 
 
-def train_model(csv_path: str, train_ratio: float = 0.9, n_estimators: int = 2000,
-                learning_rate: float = 0.01, max_depth: int = 7, tune: bool = False,
-                n_trials: int = 100):
+def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100):
     """Train XGBoost classifier: predict LONG(1) vs SHORT(0)."""
     df, feature_cols = load_and_prepare(csv_path)
     device = detect_gpu()
@@ -219,18 +216,11 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_estimators: int = 200
     print(f"Device: {device}")
     print(f"Target distribution: LONG={df['TARGET'].sum()}, SHORT={len(df)-df['TARGET'].sum()}")
 
-    # Optuna tuning
-    if tune:
-        if not HAS_OPTUNA:
-            print("WARNING: optuna not installed. Run: pip install optuna")
-            print("Falling back to default hyperparameters.")
-        else:
-            best_params = optimize_hyperparams(df, feature_cols, n_trials)
-            n_estimators = best_params.pop("n_estimators")
-            learning_rate = best_params.pop("learning_rate")
-            max_depth = best_params.pop("max_depth")
-    else:
-        best_params = {}
+    # Always run Optuna to find best hyperparameters
+    best_params = optimize_hyperparams(df, feature_cols, n_trials)
+    n_estimators = best_params.pop("n_estimators")
+    learning_rate = best_params.pop("learning_rate")
+    max_depth = best_params.pop("max_depth")
 
     # Chronological split
     split_idx = int(len(df) * train_ratio)
@@ -399,15 +389,10 @@ def main():
     parser = argparse.ArgumentParser(description="Train XGBoost for LONG/SHORT prediction")
     parser.add_argument("--csv", type=str, required=True, help="Path to CSV from fetch_stock_data.py")
     parser.add_argument("--train-ratio", type=float, default=0.9, help="Train/test split ratio")
-    parser.add_argument("--n-estimators", type=int, default=2000, help="Number of trees")
-    parser.add_argument("--learning-rate", type=float, default=0.01, help="Learning rate")
-    parser.add_argument("--max-depth", type=int, default=7, help="Max tree depth")
-    parser.add_argument("--tune", action="store_true", help="Run Optuna hyperparameter optimization")
     parser.add_argument("--n-trials", type=int, default=100, help="Number of Optuna trials")
     args = parser.parse_args()
 
-    train_model(args.csv, args.train_ratio, args.n_estimators, args.learning_rate,
-                args.max_depth, args.tune, args.n_trials)
+    train_model(args.csv, args.train_ratio, args.n_trials)
 
 
 if __name__ == "__main__":
