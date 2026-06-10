@@ -1,0 +1,156 @@
+"""
+current.py - Make a LONG/SHORT decision based on current price.
+
+When you enter the traderoom, you see the current price but today's OHLCV
+candle isn't complete yet. This script:
+1. Loads the latest trained model for the ticker
+2. Fetches recent completed candles to compute indicators
+3. Uses the LAST COMPLETED candle's indicators to predict direction
+4. Calculates TP/SL levels and percentages based on YOUR current price + ATR
+
+Usage:
+    python current.py --ticker AAPL --price 301.50
+    python current.py --ticker AAPL --price 301.50 --tp-mult 2.0 --sl-mult 1.0
+"""
+import os
+import glob
+import argparse
+import numpy as np
+import pandas as pd
+import xgboost as xgb
+import joblib
+from datetime import datetime
+
+from fetch_stock_data import fetch_ohlcv, compute_atr, compute_technical_indicators
+from train_xgboost import load_and_prepare
+
+
+def find_latest_model(ticker: str, model_dir: str):
+    """Find the most recent model files for a ticker."""
+    pattern = os.path.join(model_dir, f"{ticker}_*_xgboost_model.json")
+    models = sorted(glob.glob(pattern), reverse=True)
+    if not models:
+        return None, None, None
+
+    model_path = models[0]
+    prefix = model_path.replace("_xgboost_model.json", "")
+    scaler_path = prefix + "_xgboost_scaler.pkl"
+    features_path = prefix + "_xgboost_features.txt"
+
+    if not os.path.exists(scaler_path) or not os.path.exists(features_path):
+        return None, None, None
+
+    return model_path, scaler_path, features_path
+
+
+def get_latest_indicators(ticker: str):
+    """Fetch recent data and compute indicators on the last completed candle."""
+    # Fetch enough data for all indicators to be valid
+    df = fetch_ohlcv(ticker, months=6, warmup_days=300)
+    df["ATR"] = compute_atr(df, 14)
+    df = compute_technical_indicators(df)
+    df = df.dropna().reset_index(drop=True)
+
+    if len(df) == 0:
+        return None, None
+
+    latest = df.iloc[-1]
+    atr = latest["ATR"]
+    return df, atr
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Get LONG/SHORT decision for current price")
+    parser.add_argument("--ticker", type=str, required=True, help="Stock ticker")
+    parser.add_argument("--price", type=float, required=True, help="Current market price")
+    parser.add_argument("--tp-mult", type=float, default=1.5, help="TP multiplier of ATR")
+    parser.add_argument("--sl-mult", type=float, default=1.0, help="SL multiplier of ATR")
+    args = parser.parse_args()
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    model_dir = os.path.join(base_dir, "models")
+
+    # Find model
+    model_path, scaler_path, features_path = find_latest_model(args.ticker, model_dir)
+    if model_path is None:
+        print(f"ERROR: No trained model found for {args.ticker}")
+        print(f"Run first: python train_xgboost.py --csv data/{args.ticker}_tpsl_data_YYYYMMDD.csv")
+        return
+
+    print(f"{'='*60}")
+    print(f"  {args.ticker} TRADE DECISION — Current Price: ${args.price:.2f}")
+    print(f"{'='*60}")
+    print(f"\nModel: {os.path.basename(model_path)}")
+
+    # Load model
+    model = xgb.XGBClassifier()
+    model.load_model(model_path)
+    scaler = joblib.load(scaler_path)
+    with open(features_path) as f:
+        feature_cols = [line.strip() for line in f.readlines()]
+
+    # Get indicators from last completed candle
+    print("Fetching latest market data...")
+    df, atr = get_latest_indicators(args.ticker)
+    if df is None:
+        print("ERROR: Could not fetch market data")
+        return
+
+    latest_row = df.iloc[-1]
+    last_close = latest_row["Close"]
+    last_date = latest_row["Date"]
+    print(f"Last completed candle: {str(last_date)[:10]} | Close: ${last_close:.2f}")
+    print(f"ATR(14): ${atr:.2f}")
+
+    # Predict using the latest completed candle's indicators
+    X = df[feature_cols].iloc[[-1]].values
+    X_scaled = scaler.transform(X)
+    pred = model.predict(X_scaled)[0]
+    prob = model.predict_proba(X_scaled)[0]
+
+    direction = "LONG" if pred == 1 else "SHORT"
+    confidence = prob[pred] * 100
+
+    # Calculate TP/SL based on CURRENT PRICE (not last close)
+    if direction == "LONG":
+        tp_price = args.price + args.tp_mult * atr
+        sl_price = args.price - args.sl_mult * atr
+    else:
+        tp_price = args.price - args.tp_mult * atr
+        sl_price = args.price + args.sl_mult * atr
+
+    tp_pct = (tp_price - args.price) / args.price * 100
+    sl_pct = (sl_price - args.price) / args.price * 100
+
+    # Output
+    direction_symbol = "▲" if direction == "LONG" else "▼"
+    print(f"\n{'─'*60}")
+    print(f"  VERDICT: {direction_symbol} {direction}")
+    print(f"  Confidence: {confidence:.1f}%")
+    print(f"  P(LONG): {prob[1]*100:.1f}%  |  P(SHORT): {prob[0]*100:.1f}%")
+    print(f"{'─'*60}")
+    print(f"\n  Entry Price:  ${args.price:.2f}")
+    print(f"  Take Profit:  ${tp_price:.2f}  ({tp_pct:+.2f}%)")
+    print(f"  Stop Loss:    ${sl_price:.2f}  ({sl_pct:+.2f}%)")
+    print(f"  R:R Ratio:    {args.tp_mult:.1f} : {args.sl_mult:.1f}")
+    print(f"\n  ATR-based levels:")
+    print(f"    TP = Entry {'+ ' if direction == 'LONG' else '- '}{args.tp_mult} × ATR({atr:.2f}) = ${tp_price:.2f}")
+    print(f"    SL = Entry {'- ' if direction == 'LONG' else '+ '}{args.sl_mult} × ATR({atr:.2f}) = ${sl_price:.2f}")
+
+    # Risk table for common position sizes
+    print(f"\n{'─'*60}")
+    print(f"  POSITION SIZING (per $10,000 capital)")
+    print(f"{'─'*60}")
+    risk_per_share = abs(args.price - sl_price)
+    for risk_pct in [1, 2, 3, 5]:
+        risk_amount = 10000 * risk_pct / 100
+        shares = int(risk_amount / risk_per_share)
+        position_size = shares * args.price
+        potential_gain = shares * abs(tp_price - args.price)
+        print(f"  {risk_pct}% risk (${risk_amount:.0f}): {shares} shares (${position_size:.0f}) → TP gain: ${potential_gain:.0f}")
+
+    print(f"\n{'='*60}")
+
+
+if __name__ == "__main__":
+    main()
