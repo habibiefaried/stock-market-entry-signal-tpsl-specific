@@ -75,14 +75,17 @@ Given today's market conditions, should I enter LONG or SHORT to maximize my cha
 
 ### Experimental: LSTM+CNN Deep Features (`train_xgboost_cnn_lstm_experimental.py`)
 
-An experimental variant that adds 24 learned features from a small neural network:
+An experimental variant that adds 4 learned features from a deep neural network:
 
 | Component | Spec | Purpose |
 |-----------|------|---------|
-| LSTM | 32 hidden → 16 output | Regime detection (bullish/bearish phase) |
-| CNN | 32→16 conv → 8 output | Non-linear pattern discovery |
-| Input | 15-day × 66 indicators | Key oscillators/ratios only |
-| Training | 30 epochs, CUDA, ~2 min | Adam optimizer, CrossEntropyLoss |
+| LSTM | 2-layer 64-hidden → fc32 → fc8 → **2 output** | Regime encoding (bullish/bearish phase) |
+| CNN | 3-layer conv 64→32→16 → fc8 → **2 output** | Pattern encoding (non-linear signals) |
+| Input | 15-day × ~60 key indicators | Key oscillators/ratios only |
+| Training | 30 epochs, CUDA, Adam, CrossEntropyLoss | ~2 min on GPU |
+| XGBoost | Same config as `train_xgboost.py` | Optuna + XGBoostPruningCallback, 500-10000 trees |
+
+**Total deep features: 4** (LSTM_0, LSTM_1, CNN_0, CNN_1) — deeper network compresses temporal patterns into a tight bottleneck rather than passing through 24 noisy activations.
 
 **Why it underperforms in backtest/Monte Carlo despite higher Optuna WR:**
 

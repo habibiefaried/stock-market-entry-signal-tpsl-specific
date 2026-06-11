@@ -13,11 +13,14 @@ from datetime import datetime
 # to CUDA DMatrix — harmless performance hint, not a correctness issue)
 warnings.filterwarnings("ignore", message=".*mismatched devices.*")
 
+import time
+
 try:
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
+    from optuna_integration import XGBoostPruningCallback
 except ImportError:
-    raise ImportError("optuna is required. Run: pip install optuna")
+    raise ImportError("optuna and optuna-integration are required. Run: pip install optuna 'optuna-integration[xgboost]'")
 
 
 def load_and_prepare(csv_path: str):
@@ -112,10 +115,10 @@ def load_and_prepare(csv_path: str):
     return df, feature_cols
 
 
-def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1):
+def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1, trial=None):
     """
     Walk-forward cross-validation: train on expanding window, test on next chunk.
-    More realistic than random CV for time series.
+    Uses XGBoostPruningCallback to prune bad trials mid-training (per-tree level).
     """
     n = len(df)
     test_len = int(n * test_size)
@@ -144,6 +147,10 @@ def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1):
         n_short = len(y_train) - n_long
         sw = n_short / n_long if n_long > 0 else 1.0
 
+        callbacks = []
+        if trial is not None:
+            callbacks.append(XGBoostPruningCallback(trial, "validation_0-logloss"))
+
         model = xgb.XGBClassifier(
             **params,
             scale_pos_weight=sw,
@@ -151,6 +158,7 @@ def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1):
             eval_metric="logloss",
             random_state=42,
             early_stopping_rounds=30,
+            callbacks=callbacks if callbacks else None,
         )
         model.fit(X_train_s, y_train, eval_set=[(X_test_s, y_test)], verbose=False)
 
@@ -166,17 +174,29 @@ def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1):
         win_rate = correct / len(test_df)
         scores.append(win_rate)
 
+        # Report intermediate value for pruning (after each fold)
+        if trial is not None:
+            trial.report(np.mean(scores), i)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+
     return np.mean(scores) if scores else 0.0
 
 
 def optimize_hyperparams(df, feature_cols, n_trials=100):
-    """Optuna Bayesian hyperparameter optimization."""
-    print(f"Running Optuna optimization ({n_trials} trials)...")
+    """
+    Optuna Bayesian hyperparameter optimization with XGBoostPruningCallback.
+
+    Uses two levels of pruning:
+    1. XGBoostPruningCallback: prunes individual trials mid-training
+    2. MedianPruner: prunes trials whose fold scores are in the bottom half
+    """
+    print(f"Running Optuna optimization ({n_trials} trials, with XGBoostPruningCallback)...")
 
     def objective(trial):
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 500, 5000),
-            "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
+            "n_estimators": trial.suggest_int("n_estimators", 500, 10000),
+            "learning_rate": trial.suggest_float("learning_rate", 0.001, 0.2, log=True),
             "max_depth": trial.suggest_int("max_depth", 3, 10),
             "subsample": trial.suggest_float("subsample", 0.6, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
@@ -185,16 +205,17 @@ def optimize_hyperparams(df, feature_cols, n_trials=100):
             "reg_alpha": trial.suggest_float("reg_alpha", 0.0, 10.0),
             "reg_lambda": trial.suggest_float("reg_lambda", 0.0, 10.0),
         }
-        return walk_forward_cv(df, feature_cols, params, n_splits=5)
+        return walk_forward_cv(df, feature_cols, params, n_splits=5, trial=trial)
 
     study = optuna.create_study(
         direction="maximize",
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=5),
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=2),
     )
     study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
 
     print(f"\nBest walk-forward win rate: {study.best_value*100:.1f}%")
     print(f"Best params: {study.best_params}")
+    print(f"Pruned trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])}/{n_trials}")
     return study.best_params
 
 
@@ -350,6 +371,8 @@ def generate_deep_features(df, feature_cols, seq_len=15, epochs=30, lr=0.001):
 def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100,
                 use_deep: bool = True):
     """Train XGBoost classifier: predict LONG(1) vs SHORT(0)."""
+    total_start = time.time()
+
     df, feature_cols = load_and_prepare(csv_path)
     device = detect_gpu()
 
@@ -359,19 +382,26 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100,
     print(f"Target distribution: LONG={df['TARGET'].sum()}, SHORT={len(df)-df['TARGET'].sum()}")
 
     # Optional: LSTM+CNN deep feature extraction
+    deep_time = 0
     if use_deep:
         print(f"\n{'='*50}")
         print("DEEP FEATURE EXTRACTION (LSTM + CNN)")
         print(f"{'='*50}")
+        deep_start = time.time()
         df, deep_cols = generate_deep_features(df, feature_cols)
+        deep_time = time.time() - deep_start
         if deep_cols:
             feature_cols = feature_cols + deep_cols
             print(f"Total features after deep: {len(feature_cols)}")
+            print(f"Deep extraction time: {deep_time:.1f}s")
         else:
             print("  Deep features unavailable — continuing with base features only")
 
     # Always run Optuna to find best hyperparameters
+    optuna_start = time.time()
     best_params = optimize_hyperparams(df, feature_cols, n_trials)
+    optuna_time = time.time() - optuna_start
+    print(f"Optuna time: {optuna_time:.1f}s")
     n_estimators = best_params.pop("n_estimators")
     learning_rate = best_params.pop("learning_rate")
     max_depth = best_params.pop("max_depth")
@@ -419,6 +449,7 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100,
         model_params["device"] = device
 
     print(f"\nModel params: depth={max_depth}, lr={learning_rate:.4f}, trees={n_estimators}, device={device}")
+    train_start = time.time()
     model = xgb.XGBClassifier(**model_params)
 
     model.fit(
@@ -426,6 +457,8 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100,
         eval_set=[(X_test_scaled, y_test)],
         verbose=False,
     )
+    train_time = time.time() - train_start
+    print(f"Final model training time: {train_time:.1f}s")
 
     # Evaluate
     y_pred = model.predict(X_test_scaled)
@@ -572,6 +605,16 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100,
     print(f"Confidence: {confidence:.1f}%")
     print(f"  P(LONG):  {prob[1]*100:.1f}%")
     print(f"  P(SHORT): {prob[0]*100:.1f}%")
+
+    total_time = time.time() - total_start
+    print(f"\n{'='*50}")
+    print(f"TIMING SUMMARY")
+    print(f"{'='*50}")
+    if deep_time > 0:
+        print(f"  Deep extraction:    {deep_time:.1f}s")
+    print(f"  Optuna tuning:      {optuna_time:.1f}s")
+    print(f"  Final model train:  {train_time:.1f}s")
+    print(f"  Total pipeline:     {total_time:.1f}s")
 
     return model, scaler, feature_cols
 
