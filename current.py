@@ -29,17 +29,18 @@ from fetch_stock_data import fetch_ohlcv, compute_atr, compute_technical_indicat
 from train_xgboost import load_and_prepare
 
 
-def find_latest_model(ticker: str, model_dir: str):
-    """Find the most recent model files for a ticker. Prefers _deep_ models if flag set."""
-    pattern = os.path.join(model_dir, f"{ticker}_*_xgboost_model.json")
+def find_latest_model(ticker: str, model_dir: str, deep: bool = False):
+    """Find the most recent model files for a ticker."""
+    suffix = "_deep" if deep else ""
+    pattern = os.path.join(model_dir, f"{ticker}_*_xgboost{suffix}_model.json")
     models = sorted(glob.glob(pattern), reverse=True)
     if not models:
         return None, None, None
 
     model_path = models[0]
-    prefix = model_path.replace("_xgboost_model.json", "")
-    scaler_path = prefix + "_xgboost_scaler.pkl"
-    features_path = prefix + "_xgboost_features.txt"
+    prefix = model_path.replace("_model.json", "")
+    scaler_path = prefix + "_scaler.pkl"
+    features_path = prefix + "_features.txt"
 
     if not os.path.exists(scaler_path) or not os.path.exists(features_path):
         return None, None, None
@@ -92,16 +93,19 @@ def main():
     parser.add_argument("--price", type=float, required=True, help="Current market price")
     parser.add_argument("--tp-mult", type=float, default=1.5, help="TP multiplier of ATR")
     parser.add_argument("--sl-mult", type=float, default=1.0, help="SL multiplier of ATR")
+    parser.add_argument("--deep", action="store_true", help="Use deep learning model (_deep_ prefix)")
     args = parser.parse_args()
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
     model_dir = os.path.join(base_dir, "models")
 
     # Find model
-    model_path, scaler_path, features_path = find_latest_model(args.ticker, model_dir)
+    model_path, scaler_path, features_path = find_latest_model(args.ticker, model_dir, args.deep)
     if model_path is None:
-        print(f"ERROR: No trained model found for {args.ticker}")
-        print(f"Run first: python train_xgboost.py --csv data/{args.ticker}_tpsl_data_YYYYMMDD.csv")
+        model_type = "deep" if args.deep else "standard"
+        print(f"ERROR: No trained {model_type} model found for {args.ticker}")
+        script = "train_xgboost_cnn_lstm_experimental.py" if args.deep else "train_xgboost.py"
+        print(f"Run first: python {script} --csv data/{args.ticker}_tpsl_data_YYYYMMDD.csv")
         return
 
     print(f"{'='*60}")

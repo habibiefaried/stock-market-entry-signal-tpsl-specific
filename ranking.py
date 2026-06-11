@@ -7,7 +7,9 @@ Models are saved for reuse with current.py.
 Usage:
     python ranking.py
     python ranking.py --n-trials 200
-    python ranking.py --deep-learning  # use LSTM+CNN experimental model
+    python ranking.py --deep-learning             # use LSTM+CNN experimental model
+    python ranking.py --lookahead 5               # tighter label window (opt 2)
+    python ranking.py --min-adx-pctile 50         # trending regime only (opt 3)
 """
 import os
 import sys
@@ -20,6 +22,10 @@ def main():
     parser = argparse.ArgumentParser(description="Train and rank all stocks")
     parser.add_argument("--n-trials", type=int, default=100, help="Optuna trials per stock")
     parser.add_argument("--deep-learning", action="store_true", help="Use LSTM+CNN experimental model")
+    parser.add_argument("--lookahead", type=int, default=10,
+                        help="Days to look forward for TP/SL label (default 10, try 5 for tighter signals)")
+    parser.add_argument("--min-adx-pctile", type=float, default=0.0,
+                        help="Only train on trending regimes: 0=all (default), 50=top half ADX")
     args = parser.parse_args()
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -42,15 +48,15 @@ def main():
 
     train_script = "train_xgboost_cnn_lstm_experimental.py" if args.deep_learning else "train_xgboost.py"
     model_label = "XGBoost-DeepLearning" if args.deep_learning else "XGBoost"
-    deep_flag = "" if not args.deep_learning else ""
 
     print(f"{'='*70}")
     print(f"  STOCK RANKING PIPELINE")
     print(f"{'='*70}")
-    print(f"  Tickers: {', '.join(tickers)}")
-    print(f"  Model: {model_label}")
-    print(f"  Optuna trials: {args.n_trials}")
-    print(f"  Train script: {train_script}")
+    print(f"  Tickers:        {', '.join(tickers)}")
+    print(f"  Model:          {model_label}")
+    print(f"  Optuna trials:  {args.n_trials}")
+    print(f"  Lookahead:      {args.lookahead} days")
+    print(f"  ADX filter:     {args.min_adx_pctile if args.min_adx_pctile > 0 else 'off'}")
     print(f"{'='*70}\n")
 
     date_str = datetime.now().strftime("%Y%m%d")
@@ -63,9 +69,10 @@ def main():
         print(f"{'─'*70}")
 
         # Step 1: Fetch data
-        print(f"  Fetching data...")
+        print(f"  Fetching data (lookahead={args.lookahead})...")
         fetch_result = subprocess.run(
-            [sys.executable, os.path.join(base_dir, "fetch_stock_data.py"), "--ticker", ticker],
+            [sys.executable, os.path.join(base_dir, "fetch_stock_data.py"),
+             "--ticker", ticker, "--lookahead", str(args.lookahead)],
             capture_output=True, text=True, cwd=base_dir
         )
         if fetch_result.returncode != 0:
@@ -80,9 +87,12 @@ def main():
             continue
 
         # Step 2: Train
-        print(f"  Training ({model_label}, {args.n_trials} trials)...")
+        adx_label = f", ADX>={args.min_adx_pctile:.0f}%" if args.min_adx_pctile > 0 else ""
+        print(f"  Training ({model_label}, {args.n_trials} trials{adx_label})...")
         train_cmd = [sys.executable, os.path.join(base_dir, train_script),
                      "--csv", csv_path, "--n-trials", str(args.n_trials)]
+        if args.min_adx_pctile > 0:
+            train_cmd += ["--min-adx-pctile", str(args.min_adx_pctile)]
         train_result = subprocess.run(
             train_cmd, capture_output=True, text=True, cwd=base_dir
         )
@@ -167,7 +177,7 @@ def main():
     output_path = os.path.join(base_dir, "ranking-report.txt")
     with open(output_path, "w") as f:
         f.write(f"STOCK RANKING REPORT — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
-        f.write(f"Model: {model_label} | Optuna trials: {args.n_trials}\n")
+        f.write(f"Model: {model_label} | Trials: {args.n_trials} | Lookahead: {args.lookahead}d | ADX filter: {args.min_adx_pctile if args.min_adx_pctile > 0 else 'off'}\n")
         f.write(f"{'='*70}\n\n")
         f.write(f"{'Rank':<5} {'Ticker':<7} {'Direction':<10} {'Confidence':<12} {'Win Rate':<10} {'Edge':<10} {'Close':<10}\n")
         f.write(f"{'─'*5} {'─'*7} {'─'*10} {'─'*12} {'─'*10} {'─'*10} {'─'*10}\n")

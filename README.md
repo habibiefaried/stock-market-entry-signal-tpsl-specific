@@ -7,26 +7,42 @@ Predicts whether to go **LONG or SHORT** on a given stock to maximize the probab
 ```bash
 pyenv local 3.11.9
 python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+source venv/bin/activate       # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 # For GPU (Windows with NVIDIA):
 pip install torch --index-url https://download.pytorch.org/whl/cu121
 
-# 1. Fetch data (9 years default)
+# ── Single stock workflow ──────────────────────────────────────────────
+# 1. Fetch 9 years of data
 python fetch_stock_data.py --ticker AAPL
 
-# 2. Train model (Optuna runs automatically, 100 trials by default)
+# 2. Train model (Optuna automatically tunes all hyperparameters)
 python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
 
-# 2b. More Optuna trials for better tuning  
-python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --n-trials 200
+# 3. Live trade decision (enter your current price)
+python current.py --ticker AAPL --price 292.45
 
-# 3. Generate HTML report with backtest + Monte Carlo (Optuna runs inside)
+# 4. Generate HTML report (backtest + Monte Carlo)
 python generate_report.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
 
-# 4. Live trade decision
-python current.py --ticker AAPL --price 302.50
+# ── Multi-stock ranking workflow ───────────────────────────────────────
+# Edit target_stocks.txt with your tickers, then:
+python ranking.py                          # train all, rank by confidence × win rate
+python ranking.py --n-trials 200          # more Optuna trials (better tuning)
+python ranking.py --deep-learning         # use LSTM+CNN experimental model
+
+# ── Optional flags ─────────────────────────────────────────────────────
+# ADX trending filter (not recommended as default — see experiments below)
+python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --min-adx-pctile 50
+python ranking.py --min-adx-pctile 50
+
+# Tighter TP/SL label window (default 10 days, try 5 for faster signals)
+python fetch_stock_data.py --ticker AAPL --lookahead 5
+python ranking.py --lookahead 5
+
+# Deep learning model for current.py
+python current.py --ticker AAPL --price 292.45 --deep
 ```
 
 ## Architecture
