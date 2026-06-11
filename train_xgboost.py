@@ -84,27 +84,34 @@ def load_and_prepare(csv_path: str):
     # Drop NaN from regime features
     df = df.dropna().reset_index(drop=True)
 
-    # === Target: 3-class (LONG=1, SHORT=0, SKIP=2) ===
-    # SKIP = both directions hit SL (choppy market, model learns when NOT to trade)
+    # === Target: binary (LONG=1, SHORT=0), drop noisy samples (both SL hit) ===
     targets = []
+    keep_mask = []
     for _, row in df.iterrows():
         long_tp = row["VERDICT_LONG"] == "TP"
         short_tp = row["VERDICT_SHORT"] == "TP"
 
         if long_tp and short_tp:
             targets.append(1 if row["DAY_PASS_LONG"] <= row["DAY_PASS_SHORT"] else 0)
+            keep_mask.append(True)
         elif long_tp:
             targets.append(1)
+            keep_mask.append(True)
         elif short_tp:
             targets.append(0)
+            keep_mask.append(True)
         else:
-            targets.append(2)  # SKIP — both hit SL
+            targets.append(-1)
+            keep_mask.append(False)
 
     df["TARGET"] = targets
-    n_long = targets.count(1)
-    n_short = targets.count(0)
-    n_skip = targets.count(2)
-    print(f"Targets: LONG={n_long}, SHORT={n_short}, SKIP={n_skip} ({n_skip/len(targets)*100:.1f}% uncertain)")
+    n_before = len(df)
+    df = df[keep_mask].reset_index(drop=True)
+    n_dropped = n_before - len(df)
+    n_long = (df["TARGET"] == 1).sum()
+    n_short = (df["TARGET"] == 0).sum()
+    print(f"Dropped {n_dropped} noisy samples (both SL hit, {n_dropped/n_before*100:.1f}%)")
+    print(f"Clean targets: LONG={n_long}, SHORT={n_short}")
 
     # === Feature selection: scale-invariant only ===
     exclude_cols = [
@@ -173,13 +180,17 @@ def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1, trial=N
 
         callbacks = []
         if trial is not None:
-            callbacks.append(XGBoostPruningCallback(trial, "validation_0-mlogloss"))
+            callbacks.append(XGBoostPruningCallback(trial, "validation_0-logloss"))
+
+        n_long = y_train.sum()
+        n_short = len(y_train) - n_long
+        sw = n_short / n_long if n_long > 0 else 1.0
 
         model = xgb.XGBClassifier(
             **params,
-            objective="multi:softprob",
-            num_class=3,
-            eval_metric="mlogloss",
+            scale_pos_weight=sw,
+            objective="binary:logistic",
+            eval_metric="logloss",
             random_state=42,
             early_stopping_rounds=30,
             callbacks=callbacks if callbacks else None,
@@ -188,18 +199,13 @@ def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1, trial=N
 
         y_pred = model.predict(X_test_s)
 
-        # Score = win rate on trades taken (LONG/SHORT only, SKIP excluded)
         correct = 0
-        traded = 0
         for idx, (_, row) in enumerate(test_df.iterrows()):
-            if y_pred[idx] == 2:
-                continue
-            traded += 1
             if y_pred[idx] == 1 and row["VERDICT_LONG"] == "TP":
                 correct += 1
             elif y_pred[idx] == 0 and row["VERDICT_SHORT"] == "TP":
                 correct += 1
-        win_rate = correct / traded if traded > 0 else 0.0
+        win_rate = correct / len(test_df)
         scores.append(win_rate)
 
         # Report intermediate value for pruning (after each fold)
@@ -270,7 +276,6 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100):
     print(f"Total samples: {len(df)}")
     print(f"Features: {len(feature_cols)}")
     print(f"Device: {device}")
-    print(f"Target distribution: LONG={df['TARGET'].sum()}, SHORT={len(df)-df['TARGET'].sum()}")
 
     # Always run Optuna to find best hyperparameters
     optuna_start = time.time()
@@ -298,7 +303,12 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100):
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    # Train XGBoost with best params (3-class: LONG=1, SHORT=0, SKIP=2)
+    # Balance classes
+    n_long = y_train.sum()
+    n_short = len(y_train) - n_long
+    scale_weight = n_short / n_long if n_long > 0 else 1.0
+
+    # Train XGBoost with best params (binary: LONG=1, SHORT=0)
     model_params = {
         "n_estimators": n_estimators,
         "learning_rate": learning_rate,
@@ -309,9 +319,9 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100):
         "gamma": best_params.get("gamma", 0.0),
         "reg_alpha": best_params.get("reg_alpha", 0.0),
         "reg_lambda": best_params.get("reg_lambda", 1.0),
-        "objective": "multi:softprob",
-        "num_class": 3,
-        "eval_metric": "mlogloss",
+        "scale_pos_weight": scale_weight,
+        "objective": "binary:logistic",
+        "eval_metric": "logloss",
         "random_state": 42,
         "early_stopping_rounds": 50,
     }
@@ -339,7 +349,7 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100):
     print(f"{'='*50}")
     print(f"Accuracy: {accuracy_score(y_test, y_pred)*100:.1f}%")
     print(f"\nClassification Report:")
-    print(classification_report(y_test, y_pred, target_names=["SHORT", "LONG", "SKIP"]))
+    print(classification_report(y_test, y_pred, target_names=["SHORT", "LONG"]))
 
     # Feature importance
     importance = model.feature_importances_
@@ -348,53 +358,43 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100):
     for fname, imp in feat_imp[:20]:
         print(f"  {fname:30s} {imp:.4f}")
 
-    # Backtest: only count trades where model says LONG or SHORT (not SKIP)
+    # Backtest
     print(f"\n{'='*50}")
     print("BACKTEST ON TEST SET")
     print(f"{'='*50}")
     correct_tp = 0
-    total_trades = 0
-    skipped = 0
+    total_trades = len(test_df)
     for idx, (_, row) in enumerate(test_df.iterrows()):
         pred = y_pred[idx]
-        if pred == 2:  # SKIP
-            skipped += 1
-            continue
-        total_trades += 1
         if pred == 1 and row["VERDICT_LONG"] == "TP":
             correct_tp += 1
         elif pred == 0 and row["VERDICT_SHORT"] == "TP":
             correct_tp += 1
 
-    if total_trades > 0:
-        win_rate = correct_tp / total_trades * 100
-        edge = win_rate / 100 * 1.5 - (1 - win_rate / 100) * 1.0
-    else:
-        win_rate = 0
-        edge = 0
-    print(f"Total candles: {len(test_df)}")
-    print(f"Trades taken: {total_trades} (LONG/SHORT)")
-    print(f"Skipped: {skipped} ({skipped/len(test_df)*100:.1f}%)")
+    win_rate = correct_tp / total_trades * 100
+    edge = win_rate / 100 * 1.5 - (1 - win_rate / 100) * 1.0
+    print(f"Trades: {total_trades}")
     print(f"Wins (TP hit): {correct_tp}")
     print(f"Losses (SL hit): {total_trades - correct_tp}")
     print(f"Win Rate: {win_rate:.1f}%")
     print(f"Expected Edge: {edge:+.3f}R per trade")
 
-    # Confidence analysis (on non-SKIP predictions only)
+    # Confidence analysis
     print(f"\n{'='*50}")
     print("CONFIDENCE ANALYSIS")
     print(f"{'='*50}")
-    for threshold in [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70]:
+    confidences = np.max(y_prob, axis=1)
+    for threshold in [0.50, 0.55, 0.60, 0.65, 0.70]:
+        mask = confidences >= threshold
+        if mask.sum() == 0:
+            continue
         filtered_correct = 0
         filtered_total = 0
         for idx, (_, row) in enumerate(test_df.iterrows()):
-            pred = y_pred[idx]
-            if pred == 2:
-                continue
-            conf = y_prob[idx][pred]
-            if conf < threshold:
+            if not mask[idx]:
                 continue
             filtered_total += 1
+            pred = y_pred[idx]
             if pred == 1 and row["VERDICT_LONG"] == "TP":
                 filtered_correct += 1
             elif pred == 0 and row["VERDICT_SHORT"] == "TP":
@@ -431,16 +431,14 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100):
     X_latest = scaler.transform(df[feature_cols].iloc[[-1]].values)
     pred = model.predict(X_latest)[0]
     prob = model.predict_proba(X_latest)[0]
-    direction_map = {0: "SHORT", 1: "LONG", 2: "SKIP"}
-    direction = direction_map[pred]
+    direction = "LONG" if pred == 1 else "SHORT"
     confidence = prob[pred] * 100
     print(f"Date: {latest['Date']}")
     print(f"Close: {latest['Close']:.2f}")
     print(f"Prediction: {direction}")
     print(f"Confidence: {confidence:.1f}%")
-    print(f"  P(SHORT): {prob[0]*100:.1f}%")
     print(f"  P(LONG):  {prob[1]*100:.1f}%")
-    print(f"  P(SKIP):  {prob[2]*100:.1f}%")
+    print(f"  P(SHORT): {prob[0]*100:.1f}%")
 
     total_time = time.time() - total_start
     print(f"\n{'='*50}")
