@@ -209,15 +209,158 @@ def detect_gpu():
     return "cpu"
 
 
-def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100):
+def generate_deep_features(df, feature_cols, seq_len=15, epochs=30, lr=0.001):
+    """Train a small LSTM+CNN on indicator sequences, extract learned features.
+
+    LSTM: 32 hidden units → 16 regime-awareness features (bullish/bearish phase)
+    CNN:  32→16 conv filters → 8 pattern features (non-traditional signals)
+
+    Returns (df_trimmed, deep_cols) where deep_cols = [LSTM_0..15, CNN_0..7].
+    First seq_len rows are dropped to form complete sequences.
+    """
+    try:
+        import torch
+        import torch.nn as nn
+    except ImportError:
+        print("  [SKIP] PyTorch not installed — skipping deep features. pip install torch")
+        return df, []
+
+    # Select a representative subset of scale-invariant indicators for the deep model
+    deep_input_cols = [c for c in feature_cols if any(k in c for k in [
+        "RSI", "Stoch", "MACD_Hist", "BB_Pct", "CCI", "ADX", "Williams",
+        "MFI", "CMF", "ROC", "Momentum", "Volatility", "CMO", "PPO",
+        "TRIX", "Vortex", "Aroon", "VHF", "Body_Ratio", "Price_Change",
+    ])]
+    if len(deep_input_cols) < 10:
+        deep_input_cols = feature_cols[:30]
+
+    print(f"  Training LSTM+CNN ({len(deep_input_cols)} inputs, seq_len={seq_len}, epochs={epochs})...")
+
+    # Define small models inline
+    class LSTMFeat(nn.Module):
+        def __init__(self, n_in, hidden=32):
+            super().__init__()
+            self.lstm = nn.LSTM(n_in, hidden, 1, batch_first=True)
+            self.fc = nn.Linear(hidden, 16)
+        def forward(self, x):
+            _, (h_n, _) = self.lstm(x)
+            return self.fc(h_n[-1])
+
+    class CNNFeat(nn.Module):
+        def __init__(self, n_in):
+            super().__init__()
+            self.conv1 = nn.Conv1d(n_in, 32, 3, padding=1)
+            self.conv2 = nn.Conv1d(32, 16, 3, padding=1)
+            self.pool = nn.AdaptiveAvgPool1d(1)
+            self.fc = nn.Linear(16, 8)
+        def forward(self, x):
+            x = x.transpose(1, 2)  # (batch, seq, features) -> (batch, features, seq)
+            x = torch.relu(self.conv1(x))
+            x = torch.relu(self.conv2(x))
+            x = self.pool(x).squeeze(-1)
+            return self.fc(x)
+
+    class CombinedExtractor(nn.Module):
+        def __init__(self, n_in):
+            super().__init__()
+            self.lstm = LSTMFeat(n_in)
+            self.cnn = CNNFeat(n_in)
+            self.classifier = nn.Linear(24, 2)
+        def forward(self, x):
+            l_feat = self.lstm(x)
+            c_feat = self.cnn(x)
+            combined = torch.cat([l_feat, c_feat], dim=1)
+            return self.classifier(combined), combined
+
+    # Prepare data
+    from sklearn.preprocessing import StandardScaler
+    feature_data = StandardScaler().fit_transform(
+        df[deep_input_cols].values.astype(np.float64)
+    ).astype(np.float32)
+
+    targets = df["TARGET"].values
+    n_seq = len(df) - seq_len
+    X_seq = np.zeros((n_seq, seq_len, len(deep_input_cols)), dtype=np.float32)
+    y_seq = np.zeros(n_seq, dtype=np.int64)
+    for i in range(n_seq):
+        X_seq[i] = feature_data[i:i + seq_len]
+        y_seq[i] = targets[i + seq_len]
+
+    # Train
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    train_size = int(n_seq * 0.8)
+    X_train_t = torch.from_numpy(X_seq[:train_size].copy()).to(device)
+    y_train_t = torch.from_numpy(y_seq[:train_size].copy()).to(device)
+
+    model = CombinedExtractor(len(deep_input_cols)).to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    crit = nn.CrossEntropyLoss()
+
+    model.train()
+    bs = 64
+    for epoch in range(epochs):
+        perm = torch.randperm(len(X_train_t))
+        total_loss = 0.0
+        for i in range(0, len(X_train_t), bs):
+            idx = perm[i:i + bs]
+            logits, _ = model(X_train_t[idx])
+            loss = crit(logits, y_train_t[idx])
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            total_loss += loss.item()
+        if (epoch + 1) % 10 == 0:
+            print(f"    epoch {epoch+1}/{epochs}  loss={total_loss:.4f}")
+
+    # Extract features for all sequences
+    model.eval()
+    all_feats = []
+    with torch.no_grad():
+        X_all_t = torch.from_numpy(X_seq.copy()).to(device)
+        for i in range(0, len(X_all_t), 256):
+            _, feats = model(X_all_t[i:i + 256])
+            all_feats.append(feats.cpu().numpy())
+    all_feats = np.concatenate(all_feats, axis=0)
+
+    deep_cols = [f"LSTM_{i}" for i in range(16)] + [f"CNN_{i}" for i in range(8)]
+
+    # Trim df to match sequences
+    df = df.iloc[seq_len:].reset_index(drop=True).copy()
+    for i, col in enumerate(deep_cols):
+        df[col] = all_feats[:, i]
+
+    print(f"  Extracted {len(deep_cols)} deep features (samples: {len(df)})")
+
+    # Clean up GPU memory
+    del model, X_train_t, y_train_t, X_all_t
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+    return df, deep_cols
+
+
+def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100,
+                use_deep: bool = True):
     """Train XGBoost classifier: predict LONG(1) vs SHORT(0)."""
     df, feature_cols = load_and_prepare(csv_path)
     device = detect_gpu()
 
     print(f"Total samples: {len(df)}")
-    print(f"Features: {len(feature_cols)}")
+    print(f"Base features: {len(feature_cols)}")
     print(f"Device: {device}")
     print(f"Target distribution: LONG={df['TARGET'].sum()}, SHORT={len(df)-df['TARGET'].sum()}")
+
+    # Optional: LSTM+CNN deep feature extraction
+    if use_deep:
+        print(f"\n{'='*50}")
+        print("DEEP FEATURE EXTRACTION (LSTM + CNN)")
+        print(f"{'='*50}")
+        df, deep_cols = generate_deep_features(df, feature_cols)
+        if deep_cols:
+            feature_cols = feature_cols + deep_cols
+            print(f"Total features after deep: {len(feature_cols)}")
+        else:
+            print("  Deep features unavailable — continuing with base features only")
 
     # Always run Optuna to find best hyperparameters
     best_params = optimize_hyperparams(df, feature_cols, n_trials)
@@ -430,9 +573,10 @@ def main():
     parser.add_argument("--csv", type=str, required=True, help="Path to CSV from fetch_stock_data.py")
     parser.add_argument("--train-ratio", type=float, default=0.9, help="Train/test split ratio")
     parser.add_argument("--n-trials", type=int, default=100, help="Number of Optuna trials")
+    parser.add_argument("--no-deep", action="store_true", help="Disable LSTM+CNN deep features")
     args = parser.parse_args()
 
-    train_model(args.csv, args.train_ratio, args.n_trials)
+    train_model(args.csv, args.train_ratio, args.n_trials, use_deep=not args.no_deep)
 
 
 if __name__ == "__main__":

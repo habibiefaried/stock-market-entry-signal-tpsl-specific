@@ -22,9 +22,6 @@ python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
 # 2b. More Optuna trials for better tuning  
 python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --n-trials 200
 
-# 2c. Without deep features (if PyTorch unavailable)
-python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --no-deep
-
 # 3. Generate HTML report with backtest + Monte Carlo (Optuna runs inside)
 python generate_report.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
 
@@ -75,11 +72,38 @@ Given today's market conditions, should I enter LONG or SHORT to maximize my cha
 - **Optuna Bayesian hyperparameter tuning is mandatory** — always runs, no manual params needed
 - **MedianPruner** skips unpromising trials early, saving time
 - **Decision threshold optimization** finds the best LONG/SHORT boundary (not locked at 0.50)
-- **LSTM+CNN deep features** — a small neural network extracts 24 learned features:
-  - **LSTM** (32 hidden, 16 output): captures short-term regime shifts (bullish/bearish phase)
-  - **CNN** (32→16 conv, 8 output): detects non-traditional patterns in indicator sequences
-  - Uses 15-day sequences of ~60 key indicators, trains in ~30 epochs on GPU
-  - Disable with `--no-deep` if PyTorch is unavailable
+
+### Experimental: LSTM+CNN Deep Features (`train_xgboost_cnn_lstm_experimental.py`)
+
+An experimental variant that adds 24 learned features from a small neural network:
+
+| Component | Spec | Purpose |
+|-----------|------|---------|
+| LSTM | 32 hidden → 16 output | Regime detection (bullish/bearish phase) |
+| CNN | 32→16 conv → 8 output | Non-linear pattern discovery |
+| Input | 15-day × 66 indicators | Key oscillators/ratios only |
+| Training | 30 epochs, CUDA, ~2 min | Adam optimizer, CrossEntropyLoss |
+
+**Why it underperforms in backtest/Monte Carlo despite higher Optuna WR:**
+
+1. **Overfitting to walk-forward signal**: The LSTM+CNN is trained on the *same* data that Optuna evaluates on. It learns to produce features that score well in walk-forward CV, but these features don't generalize to the held-out test set. This is a form of **information leakage** — the neural net sees the full sequence distribution during training.
+
+2. **Feature dominance / co-adaptation**: LSTM features dominate the top-20 importance (often 10-15 of top 20 slots). This creates co-adaptation between the deep features and XGBoost, where the model relies heavily on a few high-signal deep features that may be noise on unseen data.
+
+3. **Small dataset (1995 samples)**: Neural networks typically need much more data than tree-based models. With only ~2000 samples, the LSTM+CNN cannot learn robust representations, leading to high-variance features that hurt test performance.
+
+4. **Sequence trimming**: The first 15 rows are dropped (seq_len), losing 15 data points — negligible for training but symbolically the model sees slightly less history.
+
+**The Optuna WR paradox**: Walk-forward CV uses overlapping windows within the training set. The deep features, having been trained on this distribution, score artificially high in CV but fail on the true chronological test split. This is classic **train/test mismatch** for time series.
+
+**Usage:**
+```bash
+# Train standalone
+python train_xgboost_cnn_lstm_experimental.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
+
+# Use in report (instead of standard XGBoost)
+python generate_report.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --deep-experimental
+```
 
 #### What is Optuna?
 Optuna automatically finds the best hyperparameters by running many trials and learning from each result. It uses Bayesian optimization: each trial is informed by all previous trials, so it narrows in on good values faster than random or grid search. The MedianPruner stops trials that are in the bottom half at each step, allowing more effective trials in less time.
@@ -147,10 +171,11 @@ XGBoost auto-detects NVIDIA CUDA via PyTorch:
 ## File Organization
 
 ```
-fetch_stock_data.py          # Data pipeline
-train_xgboost.py             # XGBoost + Optuna training
-generate_report.py           # HTML report generator
-current.py                   # Live trade decision
+fetch_stock_data.py                        # Data pipeline
+train_xgboost.py                           # XGBoost + Optuna training
+train_xgboost_cnn_lstm_experimental.py     # Experimental: LSTM+CNN deep features
+generate_report.py                         # HTML report generator
+current.py                                 # Live trade decision
 
 data/                        # CSV files (gitignored)
 models/                      # Trained models (gitignored)
