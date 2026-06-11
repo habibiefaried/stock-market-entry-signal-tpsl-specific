@@ -94,7 +94,8 @@ def monte_carlo(trades, n_simulations=10000, n_trades=252):
     }
 
 
-def generate_html(ticker, trades, mc_results, model_metrics, latest_prediction, feature_importance):
+def generate_html(ticker, trades, mc_results, model_metrics, latest_prediction, feature_importance,
+                  model_label="XGBoost"):
     """Generate HTML report with backtest, Monte Carlo, and verdict."""
     wins = sum(1 for t in trades if t["hit_tp"])
     losses = len(trades) - wins
@@ -163,7 +164,7 @@ def generate_html(ticker, trades, mc_results, model_metrics, latest_prediction, 
 <body>
 <div class="container">
     <h1>{ticker} Trading Signal Report</h1>
-    <p class="subtitle">Generated {datetime.now().strftime('%Y-%m-%d %H:%M')} | Model: XGBoost | TP: 1.5x ATR | SL: 1x ATR</p>
+    <p class="subtitle">Generated {datetime.now().strftime('%Y-%m-%d %H:%M')} | Model: {model_label} | TP: 1.5x ATR | SL: 1x ATR</p>
 
     <!-- Verdict Section -->
     <div class="grid">
@@ -387,10 +388,24 @@ def main():
                         help="Use train_xgboost_cnn_lstm_experimental (LSTM+CNN features)")
     args = parser.parse_args()
 
+    # --- Validate inputs ---
+    if not os.path.exists(args.csv):
+        print(f"ERROR: CSV file not found: {args.csv}")
+        print(f"Run first: python fetch_stock_data.py --ticker AAPL")
+        return
+
     if args.deep_experimental:
-        import train_xgboost_cnn_lstm_experimental as train_mod
+        try:
+            import train_xgboost_cnn_lstm_experimental as train_mod
+        except ImportError as e:
+            print(f"ERROR: Cannot import train_xgboost_cnn_lstm_experimental: {e}")
+            print("The experimental module requires PyTorch. Install it:")
+            print("  pip install torch --index-url https://download.pytorch.org/whl/cu121")
+            return
+        model_label = "XGBoost-DeepLearning"
     else:
         import train_xgboost as train_mod
+        model_label = "XGBoost"
 
     df, feature_cols = train_mod.load_and_prepare(args.csv)
     ticker = os.path.basename(args.csv).split("_")[0]
@@ -401,7 +416,7 @@ def main():
         if deep_cols:
             feature_cols = feature_cols + deep_cols
 
-    print(f"Training model for {ticker}...")
+    print(f"Training model for {ticker} ({model_label})...")
     print(f"Samples: {len(df)} | Features: {len(feature_cols)} | Device: {device}")
 
     # Optuna tuning (mandatory)
@@ -498,12 +513,14 @@ def main():
 
     # Generate HTML
     print("Generating HTML report...")
-    html = generate_html(ticker, trades, mc_results, model_metrics, latest_prediction, feat_imp)
+    html = generate_html(ticker, trades, mc_results, model_metrics, latest_prediction, feat_imp,
+                         model_label=model_label)
 
     output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
     os.makedirs(output_dir, exist_ok=True)
     date_str = datetime.now().strftime("%Y%m%d")
-    output_path = os.path.join(output_dir, f"{ticker}_report_{date_str}.html")
+    suffix = "_deep-learning" if args.deep_experimental else ""
+    output_path = os.path.join(output_dir, f"{ticker}_report_{date_str}{suffix}.html")
     with open(output_path, "w") as f:
         f.write(html)
 

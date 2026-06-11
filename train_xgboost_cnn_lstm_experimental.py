@@ -576,6 +576,11 @@ def main():
     parser.add_argument("--no-deep", action="store_true", help="Disable LSTM+CNN deep features")
     args = parser.parse_args()
 
+    if not os.path.exists(args.csv):
+        print(f"ERROR: CSV file not found: {args.csv}")
+        print(f"Run first: python fetch_stock_data.py --ticker AAPL")
+        return
+
     train_model(args.csv, args.train_ratio, args.n_trials, use_deep=not args.no_deep)
 
 

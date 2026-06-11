@@ -432,6 +432,11 @@ def main():
     parser.add_argument("--n-trials", type=int, default=100, help="Number of Optuna trials")
     args = parser.parse_args()
 
+    if not os.path.exists(args.csv):
+        print(f"ERROR: CSV file not found: {args.csv}")
+        print(f"Run first: python fetch_stock_data.py --ticker AAPL")
+        return
+
     train_model(args.csv, args.train_ratio, args.n_trials)
 
 
