@@ -67,9 +67,12 @@ Given today's market conditions, should I enter LONG or SHORT to maximize my cha
 ### The Model (train_xgboost.py)
 - XGBoost binary classifier: predicts LONG (1) vs SHORT (0)
 - Only uses scale-invariant features (no absolute prices that change over time)
+- **Noise filtering**: drops samples where both LONG and SHORT hit SL (ambiguous/choppy market — no learnable signal)
+- **Market regime features**: ATR percentile, return percentile, volatility regime, trend strength regime (all 0-100 scale, tells model "what kind of market is this?")
 - Chronological train/test split (90/10) — never peeks at future
 - Auto-detects NVIDIA GPU (`device='cuda'`)
 - **Optuna Bayesian hyperparameter tuning is mandatory** — always runs, no manual params needed
+- **XGBoostPruningCallback** kills bad trials mid-training (per-tree level)
 - **MedianPruner** skips unpromising trials early, saving time
 - **Decision threshold optimization** finds the best LONG/SHORT boundary (not locked at 0.50)
 

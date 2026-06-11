@@ -65,22 +65,51 @@ def load_and_prepare(csv_path: str):
     # Drop rows with NaN from new lags
     df = df.dropna().reset_index(drop=True)
 
-    # === Target ===
+    # === Market regime features (percentile-based, scale-invariant) ===
+    close = df["Close"]
+    atr_series = df["ATR"]
+    regime_cols = {}
+    regime_cols["ATR_Pctile_60d"] = atr_series.rolling(60).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False)
+    ret_20d = close.pct_change(20)
+    regime_cols["Return20d_Pctile_252d"] = ret_20d.rolling(252).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False)
+    regime_cols["Volatility_Regime"] = df["Volatility_20d"].rolling(60).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False)
+    regime_cols["Trend_Strength_Regime"] = df["ADX"].rolling(60).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False)
+    regime_df = pd.DataFrame(regime_cols, index=df.index)
+    df = pd.concat([df, regime_df], axis=1)
+
+    # Drop NaN from regime features
+    df = df.dropna().reset_index(drop=True)
+
+    # === Target: only label clear outcomes, drop noisy samples ===
     targets = []
+    keep_mask = []
     for _, row in df.iterrows():
         long_tp = row["VERDICT_LONG"] == "TP"
         short_tp = row["VERDICT_SHORT"] == "TP"
 
         if long_tp and short_tp:
             targets.append(1 if row["DAY_PASS_LONG"] <= row["DAY_PASS_SHORT"] else 0)
+            keep_mask.append(True)
         elif long_tp:
             targets.append(1)
+            keep_mask.append(True)
         elif short_tp:
             targets.append(0)
+            keep_mask.append(True)
         else:
-            targets.append(1 if row["DAY_PASS_LONG"] >= row["DAY_PASS_SHORT"] else 0)
+            # Both hit SL — noisy sample, skip
+            targets.append(-1)
+            keep_mask.append(False)
 
     df["TARGET"] = targets
+    n_before = len(df)
+    df = df[keep_mask].reset_index(drop=True)
+    n_dropped = n_before - len(df)
+    print(f"Dropped {n_dropped} noisy samples (both SL hit) — {len(df)} clean samples remain")
 
     # === Feature selection: scale-invariant only ===
     exclude_cols = [
