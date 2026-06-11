@@ -36,12 +36,15 @@ def load_and_prepare(csv_path: str):
     for lag in [1, 2, 3, 5, 10]:
         new_cols[f"Return_Lag_{lag}"] = daily_return.shift(lag)
 
-    vol_change = volume.pct_change() * 100
+    # (1) Fix: normalize volume change with log to tame outliers (270% spikes → ~1.3)
+    vol_change = np.log1p(volume.pct_change().abs()) * np.sign(volume.pct_change()) * 100
     for lag in [1, 2, 3, 5]:
         new_cols[f"VolChange_Lag_{lag}"] = vol_change.shift(lag)
 
+    # (1) Fix: normalize MACD_Hist by ATR (makes it scale-invariant across time)
+    macd_hist_norm = df["MACD_Hist"] / df["ATR"]
     for lag in [1, 2, 3, 5]:
-        new_cols[f"MACD_Hist_Lag_{lag}"] = df["MACD_Hist"].shift(lag)
+        new_cols[f"MACD_Hist_Norm_Lag_{lag}"] = macd_hist_norm.shift(lag)
 
     for lag in [1, 2, 3]:
         new_cols[f"BB_Pct_Lag_{lag}"] = df["BB_Pct"].shift(lag)
@@ -52,11 +55,46 @@ def load_and_prepare(csv_path: str):
     for lag in [1, 2, 3]:
         new_cols[f"ADX_Lag_{lag}"] = df["ADX"].shift(lag)
 
+    # (3) Fix: normalize CCI to -1/+1 range via tanh-like clipping
+    cci_norm = df["CCI"].clip(-200, 200) / 200
     for lag in [1, 2, 3]:
-        new_cols[f"CCI_Lag_{lag}"] = df["CCI"].shift(lag)
+        new_cols[f"CCI_Norm_Lag_{lag}"] = cci_norm.shift(lag)
 
     new_cols["Volatility_Change_5d"] = df["Volatility_5d"] - df["Volatility_5d"].shift(5)
     new_cols["RSI14_Accel"] = df["RSI14_Slope_3d"] - df["RSI14_Slope_3d"].shift(3)
+
+    # (3) Fix: normalize KST and Chaikin_Vol (clip outliers)
+    if "KST" in df.columns:
+        new_cols["KST_Norm"] = df["KST"].clip(-200, 200) / 200
+        new_cols["KST_Signal_Norm"] = df["KST_Signal"].clip(-200, 200) / 200
+    if "Chaikin_Vol" in df.columns:
+        new_cols["Chaikin_Vol_Norm"] = df["Chaikin_Vol"].clip(-100, 200) / 100
+
+    # (4) Interaction features: pre-computed combinations the model would need multiple splits to find
+    new_cols["RSI_Oversold_AND_Bullish_Engulf"] = ((df["RSI_14"] < 30) & (df["Bullish_Engulfing"] == 1)).astype(int)
+    new_cols["RSI_Overbought_AND_Bearish_Engulf"] = ((df["RSI_14"] > 70) & (df["Bearish_Engulfing"] == 1)).astype(int)
+    new_cols["ADX_Trending_AND_Momentum_Pos"] = ((df["ADX"] > 25) & (df["Momentum_5"] > 0)).astype(int)
+    new_cols["ADX_Trending_AND_Momentum_Neg"] = ((df["ADX"] > 25) & (df["Momentum_5"] < 0)).astype(int)
+    new_cols["BB_Squeeze_AND_Bullish"] = ((df["BB_Squeeze"] == 1) & (df["Close"] > df["SMA_20"])).astype(int)
+    new_cols["BB_Squeeze_AND_Bearish"] = ((df["BB_Squeeze"] == 1) & (df["Close"] < df["SMA_20"])).astype(int)
+    new_cols["Volume_Spike_AND_Bullish"] = ((df["Volume_Ratio"] > 2.0) & (df["Close"] > df["Open"])).astype(int)
+    new_cols["Volume_Spike_AND_Bearish"] = ((df["Volume_Ratio"] > 2.0) & (df["Close"] < df["Open"])).astype(int)
+    new_cols["Stoch_Oversold_AND_MACD_Cross"] = ((df["Stoch_K"] < 20) & (df["MACD_Hist"] > 0)).astype(int)
+    new_cols["Stoch_Overbought_AND_MACD_Cross"] = ((df["Stoch_K"] > 80) & (df["MACD_Hist"] < 0)).astype(int)
+    new_cols["Doji_At_Support"] = ((df["Doji"] == 1) & (df["Close_SMA20_Ratio"] < -0.03)).astype(int)
+    new_cols["Doji_At_Resistance"] = ((df["Doji"] == 1) & (df["Close_SMA20_Ratio"] > 0.03)).astype(int)
+    new_cols["Hammer_In_Downtrend"] = ((df["Hammer"] == 1) & (df["Trend_5d"] < 0)).astype(int)
+    new_cols["Shooting_Star_In_Uptrend"] = ((df["Shooting_Star"] == 1) & (df["Trend_5d"] > 0)).astype(int)
+
+    # (5) Calendar features: day-of-week and month effects
+    date_series = pd.to_datetime(df["Date"])
+    new_cols["Day_of_Week"] = date_series.dt.dayofweek  # 0=Mon, 4=Fri
+    new_cols["Month"] = date_series.dt.month
+    new_cols["Is_Monday"] = (date_series.dt.dayofweek == 0).astype(int)
+    new_cols["Is_Friday"] = (date_series.dt.dayofweek == 4).astype(int)
+    new_cols["Is_Month_Start"] = (date_series.dt.day <= 5).astype(int)
+    new_cols["Is_Month_End"] = (date_series.dt.day >= 25).astype(int)
+    new_cols["Quarter"] = date_series.dt.quarter
 
     # Concat all new columns at once (avoids PerformanceWarning: DataFrame fragmentation)
     new_df = pd.DataFrame(new_cols, index=df.index)
@@ -129,13 +167,14 @@ def load_and_prepare(csv_path: str):
         "Close_Lag_1", "Close_Lag_2", "Close_Lag_3", "Close_Lag_5",
         "Volume_Lag_1", "Volume_Lag_2", "Volume_Lag_3", "Volume_Lag_5",
         "Force_Index", "Force_Index_EMA",
-        "ATR", "MACD", "MACD_Signal",
+        "ATR", "MACD", "MACD_Signal", "MACD_Hist",
         "AO", "AO_Signal", "DPO", "Bull_Power", "Bear_Power",
         "EMA9_EMA21_Diff", "SMA20_SMA50_Diff", "SMA50_SMA200_Diff",
         "Volume_SMA_20",
-        # New absolute-price indicators
         "Wilder_MA_14", "Chaikin_Osc", "DMA_20_5",
         "EMV", "EMV_Signal",
+        # Raw unnormalized versions (replaced by normalized variants)
+        "CCI", "KST", "KST_Signal", "Chaikin_Vol",
     ]
     feature_cols = [c for c in df.columns if c not in exclude_cols]
 

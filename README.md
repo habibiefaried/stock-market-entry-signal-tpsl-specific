@@ -69,6 +69,9 @@ Given today's market conditions, should I enter LONG or SHORT to maximize my cha
 - Only uses scale-invariant features (no absolute prices that change over time)
 - **Binary prediction with noise filtering**: LONG (1) or SHORT (0). Drops samples where both directions hit SL (choppy noise). Use confidence threshold at inference to skip uncertain signals.
 - **Market regime features**: ATR percentile, return percentile, volatility regime, trend strength regime (all 0-100 scale, tells model "what kind of market is this?")
+- **Normalized features**: MACD_Hist/ATR, log-volume changes, CCI/KST clipped to bounded ranges — prevents scale drift over time
+- **Interaction features**: 14 pre-computed pattern combinations (e.g., RSI_oversold + Bullish_Engulfing, BB_Squeeze + above SMA) — gives XGBoost direct access to multi-indicator signals
+- **Calendar features**: day-of-week, month, quarter, is_monday, is_friday, month start/end — captures recurring temporal patterns
 - Chronological train/test split (90/10) — never peeks at future
 - Auto-detects NVIDIA GPU (`device='cuda'`)
 - **Optuna Bayesian hyperparameter tuning is mandatory** — always runs, no manual params needed
