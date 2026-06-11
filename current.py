@@ -4,8 +4,8 @@ current.py - Make a LONG/SHORT decision based on current price.
 When you enter the traderoom, you see the current price but today's OHLCV
 candle isn't complete yet. This script:
 1. Loads the latest trained model for the ticker
-2. Fetches recent completed candles to compute indicators
-3. Uses the LAST COMPLETED candle's indicators to predict direction
+2. Fetches recent completed candles, computes indicators + all engineered features
+3. Uses the LAST COMPLETED candle's features to predict direction
 4. Calculates TP/SL levels and percentages based on YOUR current price + ATR
 
 Usage:
@@ -13,20 +13,24 @@ Usage:
     python current.py --ticker AAPL --price 301.50 --tp-mult 2.0 --sl-mult 1.0
 """
 import os
+import sys
 import glob
 import argparse
+import warnings
 import numpy as np
 import pandas as pd
 import xgboost as xgb
 import joblib
 from datetime import datetime
 
+warnings.filterwarnings("ignore")
+
 from fetch_stock_data import fetch_ohlcv, compute_atr, compute_technical_indicators
 from train_xgboost import load_and_prepare
 
 
 def find_latest_model(ticker: str, model_dir: str):
-    """Find the most recent model files for a ticker."""
+    """Find the most recent model files for a ticker. Prefers _deep_ models if flag set."""
     pattern = os.path.join(model_dir, f"{ticker}_*_xgboost_model.json")
     models = sorted(glob.glob(pattern), reverse=True)
     if not models:
@@ -43,20 +47,43 @@ def find_latest_model(ticker: str, model_dir: str):
     return model_path, scaler_path, features_path
 
 
-def get_latest_indicators(ticker: str):
-    """Fetch recent data and compute indicators on the last completed candle."""
-    # Fetch enough data for all indicators to be valid
-    df = fetch_ohlcv(ticker, months=6, warmup_days=300)
-    df["ATR"] = compute_atr(df, 14)
-    df = compute_technical_indicators(df)
-    df = df.dropna().reset_index(drop=True)
+def get_prepared_data(ticker: str):
+    """
+    Fetch data and run the full feature engineering pipeline (same as training).
+    Returns the fully prepared dataframe with all engineered features and ATR.
+    """
+    # Fetch enough data: 14 months covers the 252-day rolling percentile window + warmup
+    df_raw = fetch_ohlcv(ticker, months=14, warmup_days=300)
+    df_raw["ATR"] = compute_atr(df_raw, 14)
+    df_raw = compute_technical_indicators(df_raw)
+    df_raw = df_raw.dropna().reset_index(drop=True)
 
-    if len(df) == 0:
-        return None, None
+    if len(df_raw) == 0:
+        return None
 
-    latest = df.iloc[-1]
-    atr = latest["ATR"]
-    return df, atr
+    # Save a temp CSV so load_and_prepare can process it (it also builds all lag/regime/interaction features)
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+
+    # Add dummy VERDICT columns so load_and_prepare doesn't crash on missing columns
+    df_raw["VERDICT_LONG"] = "TP"
+    df_raw["VERDICT_SHORT"] = "TP"
+    df_raw["DAY_PASS_LONG"] = 1
+    df_raw["DAY_PASS_SHORT"] = 1
+    df_raw["LONG_TP_Level"] = 0
+    df_raw["LONG_SL_Level"] = 0
+    df_raw["SHORT_TP_Level"] = 0
+    df_raw["SHORT_SL_Level"] = 0
+    df_raw.to_csv(tmp_path, index=False)
+
+    try:
+        df_prepared, feature_cols_from_prep = load_and_prepare(tmp_path)
+    finally:
+        os.unlink(tmp_path)
+
+    return df_prepared
 
 
 def main():
@@ -89,18 +116,26 @@ def main():
     with open(features_path) as f:
         feature_cols = [line.strip() for line in f.readlines()]
 
-    # Get indicators from last completed candle
+    # Fetch + run full feature engineering pipeline (same as training)
     print("Fetching latest market data...")
-    df, atr = get_latest_indicators(args.ticker)
+    df = get_prepared_data(args.ticker)
     if df is None:
-        print("ERROR: Could not fetch market data")
+        print("ERROR: Could not fetch or prepare market data")
         return
 
     latest_row = df.iloc[-1]
     last_close = latest_row["Close"]
     last_date = latest_row["Date"]
+    atr = latest_row["ATR"]
     print(f"Last completed candle: {str(last_date)[:10]} | Close: ${last_close:.2f}")
     print(f"ATR(14): ${atr:.2f}")
+
+    # Verify all required features are present
+    missing = [f for f in feature_cols if f not in df.columns]
+    if missing:
+        print(f"ERROR: Missing features: {missing[:5]}...")
+        print("Retrain model with: python train_xgboost.py --csv data/{ticker}_tpsl_data_YYYYMMDD.csv")
+        return
 
     # Predict using the latest completed candle's indicators
     X = df[feature_cols].iloc[[-1]].values
