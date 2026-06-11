@@ -67,7 +67,7 @@ Given today's market conditions, should I enter LONG or SHORT to maximize my cha
 ### The Model (train_xgboost.py)
 - XGBoost binary classifier: predicts LONG (1) vs SHORT (0)
 - Only uses scale-invariant features (no absolute prices that change over time)
-- **3-class prediction**: LONG (1), SHORT (0), or SKIP (2). SKIP = model detects choppy market where both directions hit SL — learns when NOT to trade
+- **Binary prediction with noise filtering**: LONG (1) or SHORT (0). Drops samples where both directions hit SL (choppy noise). Use confidence threshold at inference to skip uncertain signals.
 - **Market regime features**: ATR percentile, return percentile, volatility regime, trend strength regime (all 0-100 scale, tells model "what kind of market is this?")
 - Chronological train/test split (90/10) — never peeks at future
 - Auto-detects NVIDIA GPU (`device='cuda'`)
@@ -86,7 +86,7 @@ An experimental variant that adds 4 learned features from a deep neural network:
 | CNN | 3-layer conv 64→32→16 → fc8 → **2 output** | Pattern encoding (non-linear signals) |
 | Input | 15-day × ~60 key indicators | Key oscillators/ratios only |
 | Training | 30 epochs, CUDA, Adam, CrossEntropyLoss | ~2 min on GPU |
-| XGBoost | Same config as `train_xgboost.py` | Optuna + XGBoostPruningCallback, 500-10000 trees |
+| XGBoost | Same config as `train_xgboost.py` | Optuna + XGBoostPruningCallback, 500-15000 trees, lr 0.0005-0.2 |
 
 **Total deep features: 4** (LSTM_0, LSTM_1, CNN_0, CNN_1) — deeper network compresses temporal patterns into a tight bottleneck rather than passing through 24 noisy activations.
 
@@ -120,8 +120,8 @@ Each trial trains XGBoost with a different combination of parameters and scores 
 
 | Parameter | Search Range | What It Controls |
 |-----------|-------------|-----------------|
-| `n_estimators` | 500 – 5000 | Number of trees |
-| `learning_rate` | 0.005 – 0.1 | How much each tree contributes |
+| `n_estimators` | 500 – 15000 | Number of trees |
+| `learning_rate` | 0.0005 – 0.2 | How much each tree contributes |
 | `max_depth` | 3 – 10 | Complexity of each tree |
 | `subsample` | 0.6 – 1.0 | Fraction of rows each tree sees |
 | `colsample_bytree` | 0.5 – 1.0 | Fraction of features each tree sees |

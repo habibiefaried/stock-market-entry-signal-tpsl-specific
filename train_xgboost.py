@@ -231,8 +231,8 @@ def optimize_hyperparams(df, feature_cols, n_trials=100):
 
     def objective(trial):
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 500, 10000),
-            "learning_rate": trial.suggest_float("learning_rate", 0.001, 0.2, log=True),
+            "n_estimators": trial.suggest_int("n_estimators", 500, 15000),
+            "learning_rate": trial.suggest_float("learning_rate", 0.0005, 0.2, log=True),
             "max_depth": trial.suggest_int("max_depth", 3, 10),
             "subsample": trial.suggest_float("subsample", 0.6, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
