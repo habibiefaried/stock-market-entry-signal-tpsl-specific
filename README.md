@@ -67,7 +67,7 @@ Given today's market conditions, should I enter LONG or SHORT to maximize my cha
 ### The Model (train_xgboost.py)
 - XGBoost binary classifier: predicts LONG (1) vs SHORT (0)
 - Only uses scale-invariant features (no absolute prices that change over time)
-- **Noise filtering**: drops samples where both LONG and SHORT hit SL (ambiguous/choppy market — no learnable signal)
+- **3-class prediction**: LONG (1), SHORT (0), or SKIP (2). SKIP = model detects choppy market where both directions hit SL — learns when NOT to trade
 - **Market regime features**: ATR percentile, return percentile, volatility regime, trend strength regime (all 0-100 scale, tells model "what kind of market is this?")
 - Chronological train/test split (90/10) — never peeks at future
 - Auto-detects NVIDIA GPU (`device='cuda'`)

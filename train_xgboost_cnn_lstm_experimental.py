@@ -172,19 +172,15 @@ def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1, trial=N
         X_train_s = scaler.fit_transform(X_train)
         X_test_s = scaler.transform(X_test)
 
-        n_long = y_train.sum()
-        n_short = len(y_train) - n_long
-        sw = n_short / n_long if n_long > 0 else 1.0
-
         callbacks = []
         if trial is not None:
-            callbacks.append(XGBoostPruningCallback(trial, "validation_0-logloss"))
+            callbacks.append(XGBoostPruningCallback(trial, "validation_0-mlogloss"))
 
         model = xgb.XGBClassifier(
             **params,
-            scale_pos_weight=sw,
-            objective="binary:logistic",
-            eval_metric="logloss",
+            objective="multi:softprob",
+            num_class=3,
+            eval_metric="mlogloss",
             random_state=42,
             early_stopping_rounds=30,
             callbacks=callbacks if callbacks else None,
@@ -193,14 +189,18 @@ def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1, trial=N
 
         y_pred = model.predict(X_test_s)
 
-        # Score = win rate (actual TP hit rate when following predictions)
+        # Score = win rate on trades taken (LONG/SHORT only, SKIP excluded)
         correct = 0
+        traded = 0
         for idx, (_, row) in enumerate(test_df.iterrows()):
+            if y_pred[idx] == 2:
+                continue
+            traded += 1
             if y_pred[idx] == 1 and row["VERDICT_LONG"] == "TP":
                 correct += 1
             elif y_pred[idx] == 0 and row["VERDICT_SHORT"] == "TP":
                 correct += 1
-        win_rate = correct / len(test_df)
+        win_rate = correct / traded if traded > 0 else 0.0
         scores.append(win_rate)
 
         # Report intermediate value for pruning (after each fold)
@@ -452,12 +452,7 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100,
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    # Balance classes
-    n_long = y_train.sum()
-    n_short = len(y_train) - n_long
-    scale_weight = n_short / n_long if n_long > 0 else 1.0
-
-    # Train XGBoost with best params
+    # Train XGBoost with best params (3-class: LONG=1, SHORT=0, SKIP=2)
     model_params = {
         "n_estimators": n_estimators,
         "learning_rate": learning_rate,
@@ -468,9 +463,9 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100,
         "gamma": best_params.get("gamma", 0.0),
         "reg_alpha": best_params.get("reg_alpha", 0.0),
         "reg_lambda": best_params.get("reg_lambda", 1.0),
-        "scale_pos_weight": scale_weight,
-        "objective": "binary:logistic",
-        "eval_metric": "logloss",
+        "objective": "multi:softprob",
+        "num_class": 3,
+        "eval_metric": "mlogloss",
         "random_state": 42,
         "early_stopping_rounds": 50,
     }
@@ -498,13 +493,7 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100,
     print(f"{'='*50}")
     print(f"Accuracy: {accuracy_score(y_test, y_pred)*100:.1f}%")
     print(f"\nClassification Report:")
-    print(classification_report(y_test, y_pred, target_names=["SHORT", "LONG"]))
-
-    cm = confusion_matrix(y_test, y_pred)
-    print(f"Confusion Matrix:")
-    print(f"  Predicted:  SHORT  LONG")
-    print(f"  Actual SHORT: {cm[0][0]:4d}  {cm[0][1]:4d}")
-    print(f"  Actual LONG:  {cm[1][0]:4d}  {cm[1][1]:4d}")
+    print(classification_report(y_test, y_pred, target_names=["SHORT", "LONG", "SKIP"]))
 
     # Feature importance
     importance = model.feature_importances_
@@ -513,91 +502,61 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100,
     for fname, imp in feat_imp[:20]:
         print(f"  {fname:30s} {imp:.4f}")
 
-    # Backtest
+    # Backtest: only count trades where model says LONG or SHORT (not SKIP)
     print(f"\n{'='*50}")
     print("BACKTEST ON TEST SET")
     print(f"{'='*50}")
     correct_tp = 0
-    total_trades = len(test_df)
+    total_trades = 0
+    skipped = 0
     for idx, (_, row) in enumerate(test_df.iterrows()):
         pred = y_pred[idx]
-        if pred == 1:
-            if row["VERDICT_LONG"] == "TP":
-                correct_tp += 1
-        else:
-            if row["VERDICT_SHORT"] == "TP":
-                correct_tp += 1
+        if pred == 2:
+            skipped += 1
+            continue
+        total_trades += 1
+        if pred == 1 and row["VERDICT_LONG"] == "TP":
+            correct_tp += 1
+        elif pred == 0 and row["VERDICT_SHORT"] == "TP":
+            correct_tp += 1
 
-    win_rate = correct_tp / total_trades * 100
-    print(f"Trades: {total_trades}")
+    if total_trades > 0:
+        win_rate = correct_tp / total_trades * 100
+        edge = win_rate / 100 * 1.5 - (1 - win_rate / 100) * 1.0
+    else:
+        win_rate = 0
+        edge = 0
+    print(f"Total candles: {len(test_df)}")
+    print(f"Trades taken: {total_trades} (LONG/SHORT)")
+    print(f"Skipped: {skipped} ({skipped/len(test_df)*100:.1f}%)")
     print(f"Wins (TP hit): {correct_tp}")
     print(f"Losses (SL hit): {total_trades - correct_tp}")
     print(f"Win Rate: {win_rate:.1f}%")
-    print(f"Expected R:R per trade: 1.5:1")
-    print(f"Expected Edge: {win_rate/100 * 1.5 - (1 - win_rate/100) * 1.0:.3f}R per trade")
+    print(f"Expected Edge: {edge:+.3f}R per trade")
 
-    # Threshold optimization: find best decision boundary
-    print(f"\n{'='*50}")
-    print("THRESHOLD OPTIMIZATION")
-    print(f"{'='*50}")
-    best_threshold = 0.50
-    best_threshold_wr = win_rate
-    for thresh_candidate in np.arange(0.30, 0.75, 0.05):
-        thresh_correct = 0
-        thresh_total = 0
-        for idx, (_, row) in enumerate(test_df.iterrows()):
-            p_long = y_prob[idx][1]
-            thresh_pred = 1 if p_long >= thresh_candidate else 0
-            thresh_total += 1
-            if thresh_pred == 1 and row["VERDICT_LONG"] == "TP":
-                thresh_correct += 1
-            elif thresh_pred == 0 and row["VERDICT_SHORT"] == "TP":
-                thresh_correct += 1
-        thresh_wr = thresh_correct / thresh_total * 100
-        marker = " <-- BEST" if thresh_wr > best_threshold_wr else ""
-        print(f"  Threshold >= {thresh_candidate:.2f}: WR={thresh_wr:.1f}%{marker}")
-        if thresh_wr > best_threshold_wr:
-            best_threshold_wr = thresh_wr
-            best_threshold = thresh_candidate
-
-    # Re-apply best threshold
-    p_long_all = y_prob[:, 1]
-    y_pred = np.where(p_long_all >= best_threshold, 1, 0)
-    print(f"\nBest threshold: {best_threshold:.2f} (WR: {best_threshold_wr:.1f}%)")
-
-    # Recompute win rate with optimized threshold
-    correct_tp = 0
-    for idx, (_, row) in enumerate(test_df.iterrows()):
-        if y_pred[idx] == 1 and row["VERDICT_LONG"] == "TP":
-            correct_tp += 1
-        elif y_pred[idx] == 0 and row["VERDICT_SHORT"] == "TP":
-            correct_tp += 1
-    win_rate = correct_tp / total_trades * 100
-
-    # Confidence analysis
+    # Confidence analysis (on non-SKIP predictions only)
     print(f"\n{'='*50}")
     print("CONFIDENCE ANALYSIS")
     print(f"{'='*50}")
-    confidences = np.max(y_prob, axis=1)
-    for threshold in [0.50, 0.55, 0.60, 0.65, 0.70]:
-        mask = confidences >= threshold
-        if mask.sum() == 0:
-            continue
+    for threshold in [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70]:
         filtered_correct = 0
         filtered_total = 0
         for idx, (_, row) in enumerate(test_df.iterrows()):
-            if not mask[idx]:
+            pred = y_pred[idx]
+            if pred == 2:
+                continue
+            conf = y_prob[idx][pred]
+            if conf < threshold:
                 continue
             filtered_total += 1
-            pred = y_pred[idx]
             if pred == 1 and row["VERDICT_LONG"] == "TP":
                 filtered_correct += 1
             elif pred == 0 and row["VERDICT_SHORT"] == "TP":
                 filtered_correct += 1
         if filtered_total > 0:
             filtered_wr = filtered_correct / filtered_total * 100
-            edge = filtered_wr/100 * 1.5 - (1 - filtered_wr/100) * 1.0
-            print(f"  Confidence >= {threshold*100:.0f}%: {filtered_total} trades, Win Rate: {filtered_wr:.1f}%, Edge: {edge:+.3f}R")
+            f_edge = filtered_wr / 100 * 1.5 - (1 - filtered_wr / 100) * 1.0
+            print(f"  Confidence >= {threshold*100:.0f}%: {filtered_total} trades, Win Rate: {filtered_wr:.1f}%, Edge: {f_edge:+.3f}R")
 
     # Save model and artifacts
     ticker = os.path.basename(csv_path).split("_")[0]
@@ -605,9 +564,9 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100,
     model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
     os.makedirs(model_dir, exist_ok=True)
 
-    model_path = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost_model.json")
-    scaler_path = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost_scaler.pkl")
-    features_path = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost_features.txt")
+    model_path = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost_deep_model.json")
+    scaler_path = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost_deep_scaler.pkl")
+    features_path = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost_deep_features.txt")
 
     model.save_model(model_path)
     joblib.dump(scaler, scaler_path)
@@ -626,14 +585,16 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100,
     X_latest = scaler.transform(df[feature_cols].iloc[[-1]].values)
     pred = model.predict(X_latest)[0]
     prob = model.predict_proba(X_latest)[0]
-    direction = "LONG" if pred == 1 else "SHORT"
+    direction_map = {0: "SHORT", 1: "LONG", 2: "SKIP"}
+    direction = direction_map[pred]
     confidence = prob[pred] * 100
     print(f"Date: {latest['Date']}")
     print(f"Close: {latest['Close']:.2f}")
     print(f"Prediction: {direction}")
     print(f"Confidence: {confidence:.1f}%")
-    print(f"  P(LONG):  {prob[1]*100:.1f}%")
     print(f"  P(SHORT): {prob[0]*100:.1f}%")
+    print(f"  P(LONG):  {prob[1]*100:.1f}%")
+    print(f"  P(SKIP):  {prob[2]*100:.1f}%")
 
     total_time = time.time() - total_start
     print(f"\n{'='*50}")
