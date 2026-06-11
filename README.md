@@ -19,8 +19,11 @@ python fetch_stock_data.py --ticker AAPL
 # 2. Train model (Optuna runs automatically, 100 trials by default)
 python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
 
-# 2b. More Optuna trials for better tuning
+# 2b. More Optuna trials for better tuning  
 python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --n-trials 200
+
+# 2c. Without deep features (if PyTorch unavailable)
+python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --no-deep
 
 # 3. Generate HTML report with backtest + Monte Carlo (Optuna runs inside)
 python generate_report.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
@@ -72,6 +75,11 @@ Given today's market conditions, should I enter LONG or SHORT to maximize my cha
 - **Optuna Bayesian hyperparameter tuning is mandatory** — always runs, no manual params needed
 - **MedianPruner** skips unpromising trials early, saving time
 - **Decision threshold optimization** finds the best LONG/SHORT boundary (not locked at 0.50)
+- **LSTM+CNN deep features** — a small neural network extracts 24 learned features:
+  - **LSTM** (32 hidden, 16 output): captures short-term regime shifts (bullish/bearish phase)
+  - **CNN** (32→16 conv, 8 output): detects non-traditional patterns in indicator sequences
+  - Uses 15-day sequences of ~60 key indicators, trains in ~30 epochs on GPU
+  - Disable with `--no-deep` if PyTorch is unavailable
 
 #### What is Optuna?
 Optuna automatically finds the best hyperparameters by running many trials and learning from each result. It uses Bayesian optimization: each trial is informed by all previous trials, so it narrows in on good values faster than random or grid search. The MedianPruner stops trials that are in the bottom half at each step, allowing more effective trials in less time.

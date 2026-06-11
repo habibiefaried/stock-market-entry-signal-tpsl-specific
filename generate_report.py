@@ -9,7 +9,7 @@ import os
 import argparse
 import warnings
 from datetime import datetime
-from train_xgboost import load_and_prepare, optimize_hyperparams, detect_gpu
+from train_xgboost import load_and_prepare, optimize_hyperparams, detect_gpu, generate_deep_features
 
 # Suppress XGBoost device-mismatch warning (numpy arrays on CPU auto-converted
 # to CUDA DMatrix — harmless performance hint, not a correctness issue)
@@ -383,11 +383,17 @@ def main():
     parser.add_argument("--n-trials", type=int, default=100, help="Number of Optuna trials")
     parser.add_argument("--mc-simulations", type=int, default=10000, help="Monte Carlo simulations")
     parser.add_argument("--mc-trades", type=int, default=252, help="Trades per MC simulation")
+    parser.add_argument("--no-deep", action="store_true", help="Disable LSTM+CNN deep features")
     args = parser.parse_args()
 
     df, feature_cols = load_and_prepare(args.csv)
     ticker = os.path.basename(args.csv).split("_")[0]
     device = detect_gpu()
+
+    if not args.no_deep:
+        df, deep_cols = generate_deep_features(df, feature_cols)
+        if deep_cols:
+            feature_cols = feature_cols + deep_cols
 
     print(f"Training model for {ticker}...")
     print(f"Samples: {len(df)} | Features: {len(feature_cols)} | Device: {device}")
