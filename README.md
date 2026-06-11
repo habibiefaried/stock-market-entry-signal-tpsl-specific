@@ -183,7 +183,25 @@ python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
 
 # More trials for better results (~10 min on CPU)
 python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --n-trials 200
+
+# Trending-regime filter: only train on candles where ADX is in top N% of its 60d history
+# Tested values: 0 (default, all data), 50 (top half), 66 (top third)
+# Warning: cutting 50% of data hurts more than it helps on stocks with <2000 samples
+python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --min-adx-pctile 50
 ```
+
+#### Validated Experiments: What Actually Improves Win Rate
+
+Tested on AAPL, NFLX, AMD (9 years data, 100 Optuna trials each):
+
+| Config | AAPL WR | NFLX WR | AMD WR | Verdict |
+|--------|---------|---------|--------|---------|
+| Baseline (lh=10, no filter) | **60.0%** | 51.4% | **50.3%** | Best overall |
+| Lookahead=5, no filter | 59.3% | **55.0%** | 37.4% | Worse on AMD |
+| Lookahead=10, ADX>=50 | 59.5% | 44.0% | 50.0% | Hurts NFLX |
+| Lookahead=5, ADX>=50 | 53.7% | 47.2% | 45.6% | Worst overall |
+
+**Conclusion:** The ADX regime filter removes ~50% of training data (500-700 samples), which hurts more than the signal quality gain. The baseline (10-day lookahead, all samples) remains optimal. Confidence of 60-70%+ is achievable through the confidence threshold analysis at inference time — only trade signals where model confidence ≥ 60%.
 
 ### The Report (generate_report.py)
 - Trains model with Optuna (same mandatory tuning as `train_xgboost.py`)

@@ -305,8 +305,15 @@ def detect_gpu():
     return "cpu"
 
 
-def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100):
-    """Train XGBoost classifier: predict LONG(1) vs SHORT(0)."""
+def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100,
+                min_adx_pctile: float = 0.0):
+    """
+    Train XGBoost classifier: predict LONG(1) vs SHORT(0).
+
+    min_adx_pctile: if > 0, filter training data to trending regimes only.
+                    e.g. 50 = only train on candles where ADX is in top 50%
+                    of its 60-day rolling distribution. Default 0 = use all.
+    """
     total_start = time.time()
 
     df, feature_cols = load_and_prepare(csv_path)
@@ -315,6 +322,14 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100):
     print(f"Total samples: {len(df)}")
     print(f"Features: {len(feature_cols)}")
     print(f"Device: {device}")
+
+    # Option 3: Filter to trending regimes only
+    if min_adx_pctile > 0:
+        regime_col = "Trend_Strength_Regime"
+        if regime_col in df.columns:
+            before = len(df)
+            df = df[df[regime_col] >= min_adx_pctile].reset_index(drop=True)
+            print(f"ADX regime filter (>= {min_adx_pctile:.0f}th pctile): {before} → {len(df)} samples ({(before-len(df))/before*100:.1f}% filtered)")
 
     # Always run Optuna to find best hyperparameters
     optuna_start = time.time()
@@ -495,6 +510,8 @@ def main():
     parser.add_argument("--csv", type=str, required=True, help="Path to CSV from fetch_stock_data.py")
     parser.add_argument("--train-ratio", type=float, default=0.9, help="Train/test split ratio")
     parser.add_argument("--n-trials", type=int, default=100, help="Number of Optuna trials")
+    parser.add_argument("--min-adx-pctile", type=float, default=0.0,
+                        help="Only train on trending regimes: 0=all, 50=top half ADX, 66=top third")
     args = parser.parse_args()
 
     if not os.path.exists(args.csv):
@@ -502,7 +519,7 @@ def main():
         print(f"Run first: python fetch_stock_data.py --ticker AAPL")
         return
 
-    train_model(args.csv, args.train_ratio, args.n_trials)
+    train_model(args.csv, args.train_ratio, args.n_trials, args.min_adx_pctile)
 
 
 if __name__ == "__main__":
