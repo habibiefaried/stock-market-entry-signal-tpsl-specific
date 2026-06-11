@@ -7,6 +7,7 @@ import joblib
 import os
 import argparse
 import warnings
+import time
 from datetime import datetime
 
 # Suppress XGBoost device-mismatch warning (numpy arrays on CPU auto-converted
@@ -196,8 +197,8 @@ def optimize_hyperparams(df, feature_cols, n_trials=100):
 
     def objective(trial):
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 500, 5000),
-            "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
+            "n_estimators": trial.suggest_int("n_estimators", 500, 10000),
+            "learning_rate": trial.suggest_float("learning_rate", 0.001, 0.2, log=True),
             "max_depth": trial.suggest_int("max_depth", 3, 10),
             "subsample": trial.suggest_float("subsample", 0.6, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
@@ -233,6 +234,8 @@ def detect_gpu():
 
 def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100):
     """Train XGBoost classifier: predict LONG(1) vs SHORT(0)."""
+    total_start = time.time()
+
     df, feature_cols = load_and_prepare(csv_path)
     device = detect_gpu()
 
@@ -242,7 +245,10 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100):
     print(f"Target distribution: LONG={df['TARGET'].sum()}, SHORT={len(df)-df['TARGET'].sum()}")
 
     # Always run Optuna to find best hyperparameters
+    optuna_start = time.time()
     best_params = optimize_hyperparams(df, feature_cols, n_trials)
+    optuna_time = time.time() - optuna_start
+    print(f"Optuna time: {optuna_time:.1f}s")
     n_estimators = best_params.pop("n_estimators")
     learning_rate = best_params.pop("learning_rate")
     max_depth = best_params.pop("max_depth")
@@ -290,6 +296,7 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100):
         model_params["device"] = device
 
     print(f"\nModel params: depth={max_depth}, lr={learning_rate:.4f}, trees={n_estimators}, device={device}")
+    train_start = time.time()
     model = xgb.XGBClassifier(**model_params)
 
     model.fit(
@@ -297,6 +304,8 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100):
         eval_set=[(X_test_scaled, y_test)],
         verbose=False,
     )
+    train_time = time.time() - train_start
+    print(f"Final model training time: {train_time:.1f}s")
 
     # Evaluate
     y_pred = model.predict(X_test_scaled)
@@ -443,6 +452,14 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100):
     print(f"Confidence: {confidence:.1f}%")
     print(f"  P(LONG):  {prob[1]*100:.1f}%")
     print(f"  P(SHORT): {prob[0]*100:.1f}%")
+
+    total_time = time.time() - total_start
+    print(f"\n{'='*50}")
+    print(f"TIMING SUMMARY")
+    print(f"{'='*50}")
+    print(f"  Optuna tuning:      {optuna_time:.1f}s")
+    print(f"  Final model train:  {train_time:.1f}s")
+    print(f"  Total pipeline:     {total_time:.1f}s")
 
     return model, scaler, feature_cols
 
