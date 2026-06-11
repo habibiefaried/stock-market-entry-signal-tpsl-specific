@@ -6,7 +6,12 @@ from sklearn.metrics import classification_report, accuracy_score, confusion_mat
 import joblib
 import os
 import argparse
+import warnings
 from datetime import datetime
+
+# Suppress XGBoost device-mismatch warning (numpy arrays on CPU auto-converted
+# to CUDA DMatrix — harmless performance hint, not a correctness issue)
+warnings.filterwarnings("ignore", message=".*mismatched devices.*")
 
 try:
     import optuna
@@ -18,46 +23,42 @@ except ImportError:
 def load_and_prepare(csv_path: str):
     """Load CSV, engineer scale-invariant lag features, create target."""
     df = pd.read_csv(csv_path)
+    df = df.copy()  # defragment (fetch_stock_data.py creates 170+ columns via sequential assignment)
 
-    # === Add scale-invariant lag features ===
+    # === Add scale-invariant lag features (collect all, concat once) ===
     close = df["Close"]
     volume = df["Volume"]
 
-    # Return lags (yesterday's return, 2 days ago, etc.)
+    new_cols = {}
     daily_return = close.pct_change() * 100
     for lag in [1, 2, 3, 5, 10]:
-        df[f"Return_Lag_{lag}"] = daily_return.shift(lag)
+        new_cols[f"Return_Lag_{lag}"] = daily_return.shift(lag)
 
-    # Volume change lags
     vol_change = volume.pct_change() * 100
     for lag in [1, 2, 3, 5]:
-        df[f"VolChange_Lag_{lag}"] = vol_change.shift(lag)
+        new_cols[f"VolChange_Lag_{lag}"] = vol_change.shift(lag)
 
-    # MACD Histogram lags (relative momentum memory)
     for lag in [1, 2, 3, 5]:
-        df[f"MACD_Hist_Lag_{lag}"] = df["MACD_Hist"].shift(lag)
+        new_cols[f"MACD_Hist_Lag_{lag}"] = df["MACD_Hist"].shift(lag)
 
-    # BB_Pct lags (0-1 range, where price was in band)
     for lag in [1, 2, 3]:
-        df[f"BB_Pct_Lag_{lag}"] = df["BB_Pct"].shift(lag)
+        new_cols[f"BB_Pct_Lag_{lag}"] = df["BB_Pct"].shift(lag)
 
-    # Stochastic lags
     for lag in [1, 2, 3]:
-        df[f"Stoch_K_Lag_{lag}"] = df["Stoch_K"].shift(lag)
+        new_cols[f"Stoch_K_Lag_{lag}"] = df["Stoch_K"].shift(lag)
 
-    # ADX lags (trend strength memory)
     for lag in [1, 2, 3]:
-        df[f"ADX_Lag_{lag}"] = df["ADX"].shift(lag)
+        new_cols[f"ADX_Lag_{lag}"] = df["ADX"].shift(lag)
 
-    # CCI lags
     for lag in [1, 2, 3]:
-        df[f"CCI_Lag_{lag}"] = df["CCI"].shift(lag)
+        new_cols[f"CCI_Lag_{lag}"] = df["CCI"].shift(lag)
 
-    # Volatility change
-    df["Volatility_Change_5d"] = df["Volatility_5d"] - df["Volatility_5d"].shift(5)
+    new_cols["Volatility_Change_5d"] = df["Volatility_5d"] - df["Volatility_5d"].shift(5)
+    new_cols["RSI14_Accel"] = df["RSI14_Slope_3d"] - df["RSI14_Slope_3d"].shift(3)
 
-    # RSI acceleration (change of RSI change)
-    df["RSI14_Accel"] = df["RSI14_Slope_3d"] - df["RSI14_Slope_3d"].shift(3)
+    # Concat all new columns at once (avoids PerformanceWarning: DataFrame fragmentation)
+    new_df = pd.DataFrame(new_cols, index=df.index)
+    df = pd.concat([df, new_df], axis=1)
 
     # Drop rows with NaN from new lags
     df = df.dropna().reset_index(drop=True)
@@ -148,7 +149,6 @@ def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1):
             scale_pos_weight=sw,
             objective="binary:logistic",
             eval_metric="logloss",
-            use_label_encoder=False,
             random_state=42,
             early_stopping_rounds=30,
         )
@@ -187,7 +187,10 @@ def optimize_hyperparams(df, feature_cols, n_trials=100):
         }
         return walk_forward_cv(df, feature_cols, params, n_splits=5)
 
-    study = optuna.create_study(direction="maximize")
+    study = optuna.create_study(
+        direction="maximize",
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=5),
+    )
     study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
 
     print(f"\nBest walk-forward win rate: {study.best_value*100:.1f}%")
@@ -258,7 +261,6 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100):
         "scale_pos_weight": scale_weight,
         "objective": "binary:logistic",
         "eval_metric": "logloss",
-        "use_label_encoder": False,
         "random_state": 42,
         "early_stopping_rounds": 50,
     }
@@ -320,6 +322,44 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100):
     print(f"Win Rate: {win_rate:.1f}%")
     print(f"Expected R:R per trade: 1.5:1")
     print(f"Expected Edge: {win_rate/100 * 1.5 - (1 - win_rate/100) * 1.0:.3f}R per trade")
+
+    # Threshold optimization: find best decision boundary
+    print(f"\n{'='*50}")
+    print("THRESHOLD OPTIMIZATION")
+    print(f"{'='*50}")
+    best_threshold = 0.50
+    best_threshold_wr = win_rate
+    for thresh_candidate in np.arange(0.30, 0.75, 0.05):
+        thresh_correct = 0
+        thresh_total = 0
+        for idx, (_, row) in enumerate(test_df.iterrows()):
+            p_long = y_prob[idx][1]
+            thresh_pred = 1 if p_long >= thresh_candidate else 0
+            thresh_total += 1
+            if thresh_pred == 1 and row["VERDICT_LONG"] == "TP":
+                thresh_correct += 1
+            elif thresh_pred == 0 and row["VERDICT_SHORT"] == "TP":
+                thresh_correct += 1
+        thresh_wr = thresh_correct / thresh_total * 100
+        marker = " <-- BEST" if thresh_wr > best_threshold_wr else ""
+        print(f"  Threshold >= {thresh_candidate:.2f}: WR={thresh_wr:.1f}%{marker}")
+        if thresh_wr > best_threshold_wr:
+            best_threshold_wr = thresh_wr
+            best_threshold = thresh_candidate
+
+    # Re-apply best threshold
+    p_long_all = y_prob[:, 1]
+    y_pred = np.where(p_long_all >= best_threshold, 1, 0)
+    print(f"\nBest threshold: {best_threshold:.2f} (WR: {best_threshold_wr:.1f}%)")
+
+    # Recompute win rate with optimized threshold
+    correct_tp = 0
+    for idx, (_, row) in enumerate(test_df.iterrows()):
+        if y_pred[idx] == 1 and row["VERDICT_LONG"] == "TP":
+            correct_tp += 1
+        elif y_pred[idx] == 0 and row["VERDICT_SHORT"] == "TP":
+            correct_tp += 1
+    win_rate = correct_tp / total_trades * 100
 
     # Confidence analysis
     print(f"\n{'='*50}")

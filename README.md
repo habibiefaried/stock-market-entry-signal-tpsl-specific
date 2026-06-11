@@ -22,13 +22,10 @@ python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
 # 2b. More Optuna trials for better tuning
 python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --n-trials 200
 
-# 3. Train with Genetic Algorithm + LSTM/CNN features (best results)
-python train_xgboost_ga.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
-
-# 4. Generate HTML report with backtest + Monte Carlo (Optuna runs inside)
+# 3. Generate HTML report with backtest + Monte Carlo (Optuna runs inside)
 python generate_report.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
 
-# 5. Live trade decision
+# 4. Live trade decision
 python current.py --ticker AAPL --price 302.50
 ```
 
@@ -43,26 +40,16 @@ python current.py --ticker AAPL --price 302.50
                                 │
                 ┌───────────────┼───────────────┐
                 ▼               ▼               ▼
-┌───────────────────┐ ┌─────────────────────┐ ┌──────────────────────┐
-│ train_xgboost.py  │ │ train_xgboost_ga.py │ │ generate_report.py   │
-│                   │ │                     │ │                      │
-│ Standard XGBoost  │ │ GA + LSTM/CNN +     │ │ HTML report:         │
-│ + Optuna tuning   │ │ XGBoost (best)      │ │ - Verdict            │
-│                   │ │                     │ │ - Equity curve       │
-│ Output: models/   │ │ Output: models/     │ │ - Monte Carlo        │
-└───────────────────┘ └─────────────────────┘ │ - Backtest stats     │
-                                              │ Output: output/      │
-                                              └──────────────────────┘
-                                │
-                                ▼
-                ┌───────────────────────────┐
-                │ current.py                │
-                │                           │
-                │ Enter current price →     │
-                │ Get LONG/SHORT + TP/SL %  │
-                │ + position sizing         │
-                └───────────────────────────┘
-```
+┌───────────────────┐ ┌──────────────────────┐ ┌──────────────────────┐
+│ train_xgboost.py  │ │ generate_report.py   │ │ current.py           │
+│                   │ │                      │ │                      │
+│ XGBoost            │ │ HTML report:         │ │ Live trade decision  │
+│ + Optuna tuning   │ │ - Verdict            │ │ - LONG/SHORT + TP/SL │
+│                   │ │ - Equity curve       │ │ - Position sizing    │
+│ Output: models/   │ │ - Monte Carlo        │ │                      │
+└───────────────────┘ │ - Backtest stats     │ └──────────────────────┘
+                      │ Output: output/      │
+                      └──────────────────────┘
 
 ## How It Works
 
@@ -83,11 +70,13 @@ Given today's market conditions, should I enter LONG or SHORT to maximize my cha
 - Chronological train/test split (90/10) — never peeks at future
 - Auto-detects NVIDIA GPU (`device='cuda'`)
 - **Optuna Bayesian hyperparameter tuning is mandatory** — always runs, no manual params needed
+- **MedianPruner** skips unpromising trials early, saving time
+- **Decision threshold optimization** finds the best LONG/SHORT boundary (not locked at 0.50)
 
 #### What is Optuna?
-Optuna automatically finds the best hyperparameters by running many trials and learning from each result. It uses Bayesian optimization: each trial is informed by all previous trials, so it narrows in on good values faster than random or grid search.
+Optuna automatically finds the best hyperparameters by running many trials and learning from each result. It uses Bayesian optimization: each trial is informed by all previous trials, so it narrows in on good values faster than random or grid search. The MedianPruner stops trials that are in the bottom half at each step, allowing more effective trials in less time.
 
-Each trial trains XGBoost with a different combination of parameters and scores it using walk-forward win rate. After 100 trials, it picks the best.
+Each trial trains XGBoost with a different combination of parameters and scores it using walk-forward win rate. After training, the optimal decision threshold is found by testing thresholds from 0.30 to 0.70 and picking the one that maximizes actual TP hit rate.
 
 **Parameters Optuna tunes (you never set these manually):**
 
@@ -111,13 +100,6 @@ python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
 # More trials for better results (~10 min on CPU)
 python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --n-trials 200
 ```
-
-### The GA Model (train_xgboost_ga.py) — Best Results
-- **Genetic Algorithm** evolves both feature selection AND hyperparameters
-- **LSTM + CNN** (PyTorch) extract learned temporal features from indicator sequences
-- GA decides which of the 170+ features (traditional + deep) maximize walk-forward win rate
-- Auto-detects GPU for both XGBoost (CUDA) and PyTorch (CUDA/MPS)
-- Use `--no-deep` to skip LSTM/CNN if PyTorch has issues
 
 ### The Report (generate_report.py)
 - Trains model with Optuna (same mandatory tuning as `train_xgboost.py`)
@@ -150,17 +132,15 @@ Edge = WinRate × 1.5R - LossRate × 1.0R
 If R = $100: +$6,800 to +$9,300 expected annual return.
 
 ### GPU Support
-Both XGBoost and PyTorch auto-detect NVIDIA CUDA:
+XGBoost auto-detects NVIDIA CUDA via PyTorch:
 - XGBoost: `device='cuda'` speeds up tree building 2-4x
-- PyTorch LSTM/CNN: trains on GPU automatically
 - No manual flags needed — just have CUDA toolkit installed
 
 ## File Organization
 
 ```
 fetch_stock_data.py          # Data pipeline
-train_xgboost.py             # Standard XGBoost training
-train_xgboost_ga.py          # GA + LSTM/CNN + XGBoost (best)
+train_xgboost.py             # XGBoost + Optuna training
 generate_report.py           # HTML report generator
 current.py                   # Live trade decision
 

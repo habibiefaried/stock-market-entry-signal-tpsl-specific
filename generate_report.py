@@ -7,8 +7,13 @@ from sklearn.metrics import accuracy_score, precision_score
 import joblib
 import os
 import argparse
+import warnings
 from datetime import datetime
 from train_xgboost import load_and_prepare, optimize_hyperparams, detect_gpu
+
+# Suppress XGBoost device-mismatch warning (numpy arrays on CPU auto-converted
+# to CUDA DMatrix — harmless performance hint, not a correctness issue)
+warnings.filterwarnings("ignore", message=".*mismatched devices.*")
 
 
 def backtest(df, y_pred, y_prob):
@@ -424,7 +429,6 @@ def main():
         "scale_pos_weight": scale_weight,
         "objective": "binary:logistic",
         "eval_metric": "logloss",
-        "use_label_encoder": False,
         "random_state": 42,
         "early_stopping_rounds": 50,
     }
