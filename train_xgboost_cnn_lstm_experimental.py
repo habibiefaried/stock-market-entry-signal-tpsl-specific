@@ -210,12 +210,12 @@ def detect_gpu():
 
 
 def generate_deep_features(df, feature_cols, seq_len=15, epochs=30, lr=0.001):
-    """Train a small LSTM+CNN on indicator sequences, extract learned features.
+    """Train a deep LSTM+CNN on indicator sequences, extract compressed features.
 
-    LSTM: 32 hidden units → 16 regime-awareness features (bullish/bearish phase)
-    CNN:  32→16 conv filters → 8 pattern features (non-traditional signals)
+    LSTM: 2-layer 64-hidden → 32 → 8 → 2 features (regime encoding)
+    CNN:  3-layer 64→32→16 conv → 8 → 2 features (pattern encoding)
 
-    Returns (df_trimmed, deep_cols) where deep_cols = [LSTM_0..15, CNN_0..7].
+    Returns (df_trimmed, deep_cols) where deep_cols = [LSTM_0, LSTM_1, CNN_0, CNN_1].
     First seq_len rows are dropped to form complete sequences.
     """
     try:
@@ -236,36 +236,44 @@ def generate_deep_features(df, feature_cols, seq_len=15, epochs=30, lr=0.001):
 
     print(f"  Training LSTM+CNN ({len(deep_input_cols)} inputs, seq_len={seq_len}, epochs={epochs})...")
 
-    # Define small models inline
+    # Deep models: more layers, bottleneck to 2 features each (4 total)
     class LSTMFeat(nn.Module):
-        def __init__(self, n_in, hidden=32):
+        def __init__(self, n_in, hidden=64):
             super().__init__()
-            self.lstm = nn.LSTM(n_in, hidden, 1, batch_first=True)
-            self.fc = nn.Linear(hidden, 16)
+            self.lstm = nn.LSTM(n_in, hidden, num_layers=2, batch_first=True, dropout=0.2)
+            self.fc1 = nn.Linear(hidden, 32)
+            self.fc2 = nn.Linear(32, 8)
+            self.fc3 = nn.Linear(8, 2)
         def forward(self, x):
             _, (h_n, _) = self.lstm(x)
-            return self.fc(h_n[-1])
+            x = torch.relu(self.fc1(h_n[-1]))
+            x = torch.relu(self.fc2(x))
+            return self.fc3(x)
 
     class CNNFeat(nn.Module):
         def __init__(self, n_in):
             super().__init__()
-            self.conv1 = nn.Conv1d(n_in, 32, 3, padding=1)
-            self.conv2 = nn.Conv1d(32, 16, 3, padding=1)
+            self.conv1 = nn.Conv1d(n_in, 64, 3, padding=1)
+            self.conv2 = nn.Conv1d(64, 32, 3, padding=1)
+            self.conv3 = nn.Conv1d(32, 16, 3, padding=1)
             self.pool = nn.AdaptiveAvgPool1d(1)
-            self.fc = nn.Linear(16, 8)
+            self.fc1 = nn.Linear(16, 8)
+            self.fc2 = nn.Linear(8, 2)
         def forward(self, x):
-            x = x.transpose(1, 2)  # (batch, seq, features) -> (batch, features, seq)
+            x = x.transpose(1, 2)
             x = torch.relu(self.conv1(x))
             x = torch.relu(self.conv2(x))
+            x = torch.relu(self.conv3(x))
             x = self.pool(x).squeeze(-1)
-            return self.fc(x)
+            x = torch.relu(self.fc1(x))
+            return self.fc2(x)
 
     class CombinedExtractor(nn.Module):
         def __init__(self, n_in):
             super().__init__()
             self.lstm = LSTMFeat(n_in)
             self.cnn = CNNFeat(n_in)
-            self.classifier = nn.Linear(24, 2)
+            self.classifier = nn.Linear(4, 2)
         def forward(self, x):
             l_feat = self.lstm(x)
             c_feat = self.cnn(x)
@@ -322,7 +330,7 @@ def generate_deep_features(df, feature_cols, seq_len=15, epochs=30, lr=0.001):
             all_feats.append(feats.cpu().numpy())
     all_feats = np.concatenate(all_feats, axis=0)
 
-    deep_cols = [f"LSTM_{i}" for i in range(16)] + [f"CNN_{i}" for i in range(8)]
+    deep_cols = [f"LSTM_{i}" for i in range(2)] + [f"CNN_{i}" for i in range(2)]
 
     # Trim df to match sequences
     df = df.iloc[seq_len:].reset_index(drop=True).copy()
