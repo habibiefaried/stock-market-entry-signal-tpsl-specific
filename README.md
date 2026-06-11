@@ -111,6 +111,49 @@ python train_xgboost_cnn_lstm_experimental.py --csv data/AAPL_tpsl_data_YYYYMMDD
 python generate_report.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --deep-experimental
 ```
 
+#### How Confidence Is Calculated
+
+XGBoost outputs a probability for each class via `predict_proba()`. For binary classification:
+- `P(LONG)` = probability the model assigns to class LONG
+- `P(SHORT)` = 1 - P(LONG)
+- `Confidence` = whichever is higher (the predicted class's probability)
+
+Example:
+```
+predict_proba() → [0.38, 0.62]
+                    ↑        ↑
+                P(SHORT)  P(LONG)
+
+Prediction: LONG (higher probability)
+Confidence: 62%
+```
+
+Internally, XGBoost applies sigmoid to its raw output (log-odds):
+```
+raw_score = sum of all tree leaf values for this sample
+P(LONG) = 1 / (1 + exp(-raw_score))
+P(SHORT) = 1 - P(LONG)
+```
+
+**Why confidence matters for trading:**
+
+| Confidence | Meaning | Action |
+|-----------|---------|--------|
+| 50-55% | Barely above coin flip | Skip or reduce size |
+| 55-60% | Moderate signal | Trade with normal size |
+| 60-70% | Strong signal | Trade with confidence |
+| 70%+ | Very strong signal | Maximum conviction |
+
+The confidence analysis section in training output shows win rate at each threshold. Example from AAPL:
+```
+Confidence >= 50%: 145 trades, Win Rate: 63.4%
+Confidence >= 55%: 112 trades, Win Rate: 67.0%
+Confidence >= 60%:  91 trades, Win Rate: 72.5%
+Confidence >= 70%:  50 trades, Win Rate: 76.0%
+```
+
+Higher confidence = fewer trades but higher win rate. You choose your tradeoff.
+
 #### What is Optuna?
 Optuna automatically finds the best hyperparameters by running many trials and learning from each result. It uses Bayesian optimization: each trial is informed by all previous trials, so it narrows in on good values faster than random or grid search. The MedianPruner stops trials that are in the bottom half at each step, allowing more effective trials in less time.
 
