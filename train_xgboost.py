@@ -16,8 +16,9 @@ warnings.filterwarnings("ignore", message=".*mismatched devices.*")
 try:
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
+    from optuna_integration import XGBoostPruningCallback
 except ImportError:
-    raise ImportError("optuna is required. Run: pip install optuna")
+    raise ImportError("optuna and optuna-integration are required. Run: pip install optuna 'optuna-integration[xgboost]'")
 
 
 def load_and_prepare(csv_path: str):
@@ -112,10 +113,11 @@ def load_and_prepare(csv_path: str):
     return df, feature_cols
 
 
-def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1):
+def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1, trial=None):
     """
     Walk-forward cross-validation: train on expanding window, test on next chunk.
     More realistic than random CV for time series.
+    Uses XGBoostPruningCallback to prune bad trials mid-training (per-tree level).
     """
     n = len(df)
     test_len = int(n * test_size)
@@ -144,6 +146,10 @@ def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1):
         n_short = len(y_train) - n_long
         sw = n_short / n_long if n_long > 0 else 1.0
 
+        callbacks = []
+        if trial is not None:
+            callbacks.append(XGBoostPruningCallback(trial, "validation_0-logloss"))
+
         model = xgb.XGBClassifier(
             **params,
             scale_pos_weight=sw,
@@ -151,6 +157,7 @@ def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1):
             eval_metric="logloss",
             random_state=42,
             early_stopping_rounds=30,
+            callbacks=callbacks if callbacks else None,
         )
         model.fit(X_train_s, y_train, eval_set=[(X_test_s, y_test)], verbose=False)
 
@@ -166,12 +173,26 @@ def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1):
         win_rate = correct / len(test_df)
         scores.append(win_rate)
 
+        # Report intermediate value for pruning (after each fold)
+        if trial is not None:
+            trial.report(np.mean(scores), i)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+
     return np.mean(scores) if scores else 0.0
 
 
 def optimize_hyperparams(df, feature_cols, n_trials=100):
-    """Optuna Bayesian hyperparameter optimization."""
-    print(f"Running Optuna optimization ({n_trials} trials)...")
+    """
+    Optuna Bayesian hyperparameter optimization with XGBoostPruningCallback.
+
+    Uses two levels of pruning:
+    1. XGBoostPruningCallback: prunes individual trials mid-training if validation
+       loss plateaus (per-tree step-level pruning)
+    2. MedianPruner: prunes trials whose intermediate fold scores are in the
+       bottom half compared to completed trials (trial-level pruning)
+    """
+    print(f"Running Optuna optimization ({n_trials} trials, with XGBoostPruningCallback)...")
 
     def objective(trial):
         params = {
@@ -185,16 +206,17 @@ def optimize_hyperparams(df, feature_cols, n_trials=100):
             "reg_alpha": trial.suggest_float("reg_alpha", 0.0, 10.0),
             "reg_lambda": trial.suggest_float("reg_lambda", 0.0, 10.0),
         }
-        return walk_forward_cv(df, feature_cols, params, n_splits=5)
+        return walk_forward_cv(df, feature_cols, params, n_splits=5, trial=trial)
 
     study = optuna.create_study(
         direction="maximize",
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=5),
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=2),
     )
     study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
 
     print(f"\nBest walk-forward win rate: {study.best_value*100:.1f}%")
     print(f"Best params: {study.best_params}")
+    print(f"Pruned trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])}/{n_trials}")
     return study.best_params
 
 
