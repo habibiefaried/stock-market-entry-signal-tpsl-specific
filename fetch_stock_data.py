@@ -380,6 +380,149 @@ def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
                         (close < (open_price.shift(1) + close.shift(1)) / 2) &
                         (close > open_price.shift(1))).astype(int)
 
+    # === Additional multi-candle patterns ===
+
+    # ── 2-candle ──────────────────────────────────────────────────────────
+
+    # Tweezer Bottom: two candles with same/near-same low (potential support)
+    df["Tweezer_Bottom"] = ((body.shift(1) < 0) & (body > 0) &
+                            ((low - low.shift(1)).abs() <= full_range * 0.05)).astype(int)
+
+    # Tweezer Top: two candles with same/near-same high (potential resistance)
+    df["Tweezer_Top"] = ((body.shift(1) > 0) & (body < 0) &
+                         ((high - high.shift(1)).abs() <= full_range * 0.05)).astype(int)
+
+    # Bullish Harami: small bullish candle inside prior large bearish candle
+    df["Bullish_Harami"] = ((body.shift(1) < 0) & (body > 0) &
+                            (open_price > close.shift(1)) & (close < open_price.shift(1)) &
+                            (body_abs < body_abs.shift(1) * 0.5)).astype(int)
+
+    # Bearish Harami: small bearish candle inside prior large bullish candle
+    df["Bearish_Harami"] = ((body.shift(1) > 0) & (body < 0) &
+                            (open_price < close.shift(1)) & (close > open_price.shift(1)) &
+                            (body_abs < body_abs.shift(1) * 0.5)).astype(int)
+
+    # On Neck: bearish candle followed by small bullish closing at prior low (bearish continuation)
+    df["On_Neck"] = ((body.shift(1) < 0) & (body > 0) &
+                     ((close - low.shift(1)).abs() <= full_range.shift(1) * 0.05)).astype(int)
+
+    # Kicking Bullish: bearish marubozu → gap up → bullish marubozu
+    df["Kicking_Bullish"] = ((body.shift(1) < 0) & (body_abs.shift(1) >= full_range.shift(1) * 0.8) &
+                             (open_price > high.shift(1)) & (body > 0) &
+                             (body_abs >= full_range * 0.8)).astype(int)
+
+    # Kicking Bearish: bullish marubozu → gap down → bearish marubozu
+    df["Kicking_Bearish"] = ((body.shift(1) > 0) & (body_abs.shift(1) >= full_range.shift(1) * 0.8) &
+                             (open_price < low.shift(1)) & (body < 0) &
+                             (body_abs >= full_range * 0.8)).astype(int)
+
+    # Bullish Belt Hold: opens at low (no lower wick), closes near high
+    df["Belt_Hold_Bullish"] = ((lower_wick <= full_range * 0.02) & (body > 0) &
+                               (body_abs >= full_range * 0.6)).astype(int)
+
+    # Bearish Belt Hold: opens at high (no upper wick), closes near low
+    df["Belt_Hold_Bearish"] = ((upper_wick <= full_range * 0.02) & (body < 0) &
+                               (body_abs >= full_range * 0.6)).astype(int)
+
+    # ── 3-candle ──────────────────────────────────────────────────────────
+
+    # Three Inside Up: bearish → bullish harami → bullish confirmation
+    df["Three_Inside_Up"] = ((body.shift(2) < 0) & (body.shift(1) > 0) &
+                             (open_price.shift(1) > close.shift(2)) &
+                             (close.shift(1) < open_price.shift(2)) &
+                             (body > 0) & (close > close.shift(1))).astype(int)
+
+    # Three Inside Down: bullish → bearish harami → bearish confirmation
+    df["Three_Inside_Down"] = ((body.shift(2) > 0) & (body.shift(1) < 0) &
+                               (open_price.shift(1) < close.shift(2)) &
+                               (close.shift(1) > open_price.shift(2)) &
+                               (body < 0) & (close < close.shift(1))).astype(int)
+
+    # Three Outside Up: bearish → bullish engulfing → bullish confirmation above engulf high
+    df["Three_Outside_Up"] = ((body.shift(2) < 0) & (body.shift(1) > 0) &
+                              (close.shift(1) > open_price.shift(2)) &
+                              (open_price.shift(1) < close.shift(2)) &
+                              (body > 0) & (close > close.shift(1))).astype(int)
+
+    # Three Outside Down: bullish → bearish engulfing → bearish confirmation
+    df["Three_Outside_Down"] = ((body.shift(2) > 0) & (body.shift(1) < 0) &
+                                (close.shift(1) < open_price.shift(2)) &
+                                (open_price.shift(1) > close.shift(2)) &
+                                (body < 0) & (close < close.shift(1))).astype(int)
+
+    # Three Line Strike Bullish: 3 black crows + large bullish engulfing all 3
+    df["Three_Line_Strike_Bull"] = ((body.shift(3) < 0) & (body.shift(2) < 0) & (body.shift(1) < 0) &
+                                    (close.shift(2) < close.shift(3)) & (close.shift(1) < close.shift(2)) &
+                                    (body > 0) & (open_price <= close.shift(1)) &
+                                    (close >= open_price.shift(3))).astype(int)
+
+    # Three Line Strike Bearish: 3 white soldiers + large bearish engulfing all 3
+    df["Three_Line_Strike_Bear"] = ((body.shift(3) > 0) & (body.shift(2) > 0) & (body.shift(1) > 0) &
+                                    (close.shift(2) > close.shift(3)) & (close.shift(1) > close.shift(2)) &
+                                    (body < 0) & (open_price >= close.shift(1)) &
+                                    (close <= open_price.shift(3))).astype(int)
+
+    # Abandoned Baby Bullish: bearish → doji with gap down → bullish with gap up
+    abandoned_doji = body_abs.shift(1) <= full_range.shift(1) * 0.1
+    df["Abandoned_Baby_Bull"] = ((body.shift(2) < 0) & abandoned_doji &
+                                 (high.shift(1) < low.shift(2)) &
+                                 (body > 0) & (low > high.shift(1))).astype(int)
+
+    # Abandoned Baby Bearish: bullish → doji with gap up → bearish with gap down
+    df["Abandoned_Baby_Bear"] = ((body.shift(2) > 0) & abandoned_doji &
+                                 (low.shift(1) > high.shift(2)) &
+                                 (body < 0) & (high < low.shift(1))).astype(int)
+
+    # Tri-Star Bullish: three consecutive dojis, middle one gaps down
+    doji_cond = body_abs <= full_range * 0.1
+    df["Tri_Star_Bull"] = (doji_cond & doji_cond.shift(1) & doji_cond.shift(2) &
+                           (low.shift(1) < low.shift(2)) & (low.shift(1) < low)).astype(int)
+
+    # Tri-Star Bearish: three consecutive dojis, middle one gaps up
+    df["Tri_Star_Bear"] = (doji_cond & doji_cond.shift(1) & doji_cond.shift(2) &
+                           (high.shift(1) > high.shift(2)) & (high.shift(1) > high)).astype(int)
+
+    # ── 4-candle ──────────────────────────────────────────────────────────
+
+    # Three Methods Rising: bullish → 3 small bearish inside range → bullish breakout
+    small_pullback = (body.shift(1) < 0) & (body.shift(2) < 0) & (body.shift(3) < 0)
+    inside_range = (close.shift(1) > close.shift(4)) & (open_price.shift(3) > open_price.shift(4))
+    df["Rising_Three_Methods"] = ((body.shift(4) > 0) & (body_abs.shift(4) > body_abs.shift(1) * 2) &
+                                  small_pullback & inside_range & (body > 0) &
+                                  (close > close.shift(4))).astype(int)
+
+    # Three Methods Falling: bearish → 3 small bullish inside range → bearish breakout
+    small_rally = (body.shift(1) > 0) & (body.shift(2) > 0) & (body.shift(3) > 0)
+    inside_range_bear = (close.shift(1) < close.shift(4)) & (open_price.shift(3) < open_price.shift(4))
+    df["Falling_Three_Methods"] = ((body.shift(4) < 0) & (body_abs.shift(4) > body_abs.shift(1) * 2) &
+                                   small_rally & inside_range_bear & (body < 0) &
+                                   (close < close.shift(4))).astype(int)
+
+    # ── N-candle structural context ────────────────────────────────────────
+
+    # Candle body direction sequence encoded as integer (e.g., +1=bull, -1=bear last 4 days)
+    df["Candle_Seq_4"] = (np.sign(body).fillna(0).astype(int) +
+                          np.sign(body.shift(1)).fillna(0).astype(int) * 2 +
+                          np.sign(body.shift(2)).fillna(0).astype(int) * 4 +
+                          np.sign(body.shift(3)).fillna(0).astype(int) * 8)
+
+    # Body size trend: are candles getting bigger or smaller (momentum building or exhausting)?
+    df["Body_Size_Trend"] = np.sign(body_abs - body_abs.shift(3))
+
+    # Upper/lower wick trend: increasing wicks = indecision building
+    df["Upper_Wick_Trend"] = np.sign(upper_wick - upper_wick.shift(3))
+    df["Lower_Wick_Trend"] = np.sign(lower_wick - lower_wick.shift(3))
+
+    # Gap count in last 5 days (frequent gaps = volatile/news-driven)
+    gap_up = (open_price > high.shift(1)).astype(int)
+    gap_down = (open_price < low.shift(1)).astype(int)
+    df["Gap_Count_5d"] = gap_up.rolling(5).sum() + gap_down.rolling(5).sum()
+
+    # Inside bar: today's range fully within yesterday's range (compression before breakout)
+    df["Inside_Bar"] = ((high < high.shift(1)) & (low > low.shift(1))).astype(int)
+    df["Outside_Bar"] = ((high > high.shift(1)) & (low < low.shift(1))).astype(int)
+    df["Inside_Bar_Streak"] = df["Inside_Bar"].groupby((~df["Inside_Bar"].astype(bool)).cumsum()).cumsum()
+
     # === Trend strength features ===
     df["Trend_5d"] = np.sign(close - close.shift(5))
     df["Trend_10d"] = np.sign(close - close.shift(10))
