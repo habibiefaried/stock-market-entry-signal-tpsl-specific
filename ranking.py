@@ -20,8 +20,12 @@ from datetime import datetime
 
 def main():
     parser = argparse.ArgumentParser(description="Train and rank all stocks")
-    parser.add_argument("--n-trials", type=int, default=100, help="Optuna trials per stock")
-    parser.add_argument("--deep-learning", action="store_true", help="Use LSTM+CNN experimental model")
+    parser.add_argument("--n-trials", type=int, default=None,
+                        help="Optuna trials per stock (default: 250 on GPU, 100 on CPU)")
+    parser.add_argument("--deep-learning", action="store_true",
+                        help="Force enable LSTM+CNN deep features")
+    parser.add_argument("--no-deep", action="store_true",
+                        help="Force disable LSTM+CNN deep features")
     parser.add_argument("--lookahead", type=int, default=10,
                         help="Days to look forward for TP/SL label (default 10, try 5 for tighter signals)")
     parser.add_argument("--min-adx-pctile", type=float, default=0.0,
@@ -47,14 +51,26 @@ def main():
         sys.exit(1)
 
     train_script = "train.py"
-    model_label = "XGBoost-DeepLearning" if args.deep_learning else "XGBoost"
+
+    # Resolve deep-learning flag — let train.py auto-detect if neither specified
+    if args.no_deep:
+        deep_flag = "--no-deep"
+        model_label = "XGBoost"
+    elif args.deep_learning:
+        deep_flag = "--deep-learning"
+        model_label = "XGBoost-DeepLearning"
+    else:
+        deep_flag = None  # auto (train.py will detect GPU)
+        model_label = "XGBoost (auto)"
+
+    trials_label = str(args.n_trials) if args.n_trials else "auto (250 GPU / 100 CPU)"
 
     print(f"{'='*70}")
     print(f"  STOCK RANKING PIPELINE")
     print(f"{'='*70}")
     print(f"  Tickers:        {', '.join(tickers)}")
     print(f"  Model:          {model_label}")
-    print(f"  Optuna trials:  {args.n_trials}")
+    print(f"  Optuna trials:  {trials_label}")
     print(f"  Lookahead:      {args.lookahead} days")
     print(f"  ADX filter:     {args.min_adx_pctile if args.min_adx_pctile > 0 else 'off'}")
     print(f"{'='*70}\n")
@@ -89,10 +105,11 @@ def main():
         # Step 2: Train
         adx_label = f", ADX>={args.min_adx_pctile:.0f}%" if args.min_adx_pctile > 0 else ""
         print(f"  Training ({model_label}, {args.n_trials} trials{adx_label})...")
-        train_cmd = [sys.executable, os.path.join(base_dir, train_script),
-                     "--csv", csv_path, "--n-trials", str(args.n_trials)]
-        if args.deep_learning:
-            train_cmd.append("--deep-learning")
+        train_cmd = [sys.executable, os.path.join(base_dir, train_script), "--csv", csv_path]
+        if args.n_trials is not None:
+            train_cmd += ["--n-trials", str(args.n_trials)]
+        if deep_flag:
+            train_cmd.append(deep_flag)
         if args.min_adx_pctile > 0:
             train_cmd += ["--min-adx-pctile", str(args.min_adx_pctile)]
         train_result = subprocess.run(

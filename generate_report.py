@@ -387,11 +387,14 @@ new Chart(mcCtx, {{
 def main():
     parser = argparse.ArgumentParser(description="Generate HTML report with backtest and Monte Carlo")
     parser.add_argument("--csv", type=str, required=True, help="Path to CSV from fetch_stock_data.py")
-    parser.add_argument("--n-trials", type=int, default=100, help="Number of Optuna trials")
+    parser.add_argument("--n-trials", type=int, default=None,
+                        help="Optuna trials (default: 300 on GPU, 100 on CPU)")
     parser.add_argument("--mc-simulations", type=int, default=10000, help="Monte Carlo simulations")
     parser.add_argument("--mc-trades", type=int, default=252, help="Trades per MC simulation")
-    parser.add_argument("--deep-learning", action="store_true",
-                        help="Add LSTM+CNN deep features (requires PyTorch, GPU recommended)")
+    parser.add_argument("--deep-learning", action="store_true", default=False,
+                        help="Force enable LSTM+CNN deep features")
+    parser.add_argument("--no-deep", action="store_true",
+                        help="Force disable LSTM+CNN deep features")
     args = parser.parse_args()
 
     # --- Validate inputs ---
@@ -400,13 +403,25 @@ def main():
         print(f"Run first: python fetch_stock_data.py --ticker AAPL")
         return
 
-    model_label = "XGBoost-DeepLearning" if args.deep_learning else "XGBoost"
-
     df, feature_cols = load_and_prepare(args.csv)
     ticker = os.path.basename(args.csv).split("_")[0]
     device = detect_gpu()
+    gpu_available = device != "cpu"
 
-    if args.deep_learning:
+    # Auto-configure based on hardware
+    if args.n_trials is None:
+        args.n_trials = 250 if gpu_available else 100
+    if args.no_deep:
+        use_deep = False
+    elif use_deep:
+        use_deep = True
+    else:
+        use_deep = gpu_available  # auto: ON with GPU, OFF without
+
+    model_label = "XGBoost-DeepLearning" if use_deep else "XGBoost"
+    print(f"Hardware: {device} → n_trials={args.n_trials}, deep_learning={'ON' if use_deep else 'OFF'} (auto)")
+
+    if use_deep:
         df, deep_cols = generate_deep_features(df, feature_cols)
         if deep_cols:
             feature_cols = feature_cols + deep_cols
@@ -542,7 +557,7 @@ def main():
     output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
     os.makedirs(output_dir, exist_ok=True)
     date_str = datetime.now().strftime("%Y%m%d")
-    suffix = "_deep-learning" if args.deep_learning else ""
+    suffix = "_deep-learning" if use_deep else ""
     output_path = os.path.join(output_dir, f"{ticker}_report_{date_str}{suffix}.html")
     with open(output_path, "w") as f:
         f.write(html)

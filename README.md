@@ -17,11 +17,16 @@ pip install torch --index-url https://download.pytorch.org/whl/cu121
 # 1. Fetch 9 years of data
 python fetch_stock_data.py --ticker AAPL
 
-# 2. Train model (Optuna automatically tunes all hyperparameters)
+# 2. Train model — GPU auto-detected:
+#    GPU found  →  250 Optuna trials + LSTM/CNN deep features ON
+#    CPU only   →  100 Optuna trials + LSTM/CNN deep features OFF
 python train.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
 
-# 2b. Train with LSTM+CNN deep features (GPU strongly recommended)
-python train.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --deep-learning
+# Override: force no deep (useful on GPU but want faster run)
+python train.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --no-deep
+
+# Override: custom trial count
+python train.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --n-trials 200
 
 # 3. Live trade decision (enter your current price)
 python current.py --ticker AAPL --price 292.45
@@ -423,10 +428,21 @@ Edge = WinRate × 1.5R - LossRate × 1.0R
 ```
 If R = $100: +$6,800 to +$9,300 expected annual return.
 
-### GPU Support
-XGBoost auto-detects NVIDIA CUDA via PyTorch:
-- XGBoost: `device='cuda'` speeds up tree building 2-4x
-- No manual flags needed — just have CUDA toolkit installed
+### GPU Auto-Detection
+
+When NVIDIA CUDA is detected, the pipeline automatically upgrades:
+
+| Setting | CPU default | GPU auto |
+|---------|------------|---------|
+| Optuna trials | 100 | **250** |
+| LSTM/CNN deep features | OFF | **ON** |
+| XGBoost device | cpu | **cuda** |
+
+No manual flags needed — just have CUDA + PyTorch installed. To override:
+```bash
+python train.py --csv data/AAPL_*.csv --no-deep       # GPU but no deep
+python train.py --csv data/AAPL_*.csv --n-trials 100  # GPU but fewer trials
+```
 
 ## File Organization
 

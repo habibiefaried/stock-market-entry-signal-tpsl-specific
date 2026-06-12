@@ -466,8 +466,8 @@ def _find_best_threshold_optuna(df_valid, y_pred_valid, y_prob_valid, n_trials=4
     return round(study.best_params["threshold"], 2), study.best_value
 
 
-def train_model(csv_path: str, train_ratio: float = 0.8, n_trials: int = 100,
-                use_deep: bool = False, min_adx_pctile: float = 0.0):
+def train_model(csv_path: str, train_ratio: float = 0.8, n_trials: int = None,
+                use_deep: bool = None, min_adx_pctile: float = 0.0):
     """
     Train XGBoost classifier: predict LONG(1) vs SHORT(0).
 
@@ -476,12 +476,22 @@ def train_model(csv_path: str, train_ratio: float = 0.8, n_trials: int = 100,
       10% VALID   → Confidence threshold tuned here (separate from Optuna)
       10% TEST    → Final honest backtest, completely untouched until end
 
-    use_deep:         Add 4 LSTM+CNN deep features (requires PyTorch + GPU recommended)
-    min_adx_pctile:   0=all data (default), 50=top-half ADX trending only
+    n_trials:     None = auto (300 if GPU detected, 100 if CPU)
+    use_deep:     None = auto (True if GPU detected, False if CPU)
+    min_adx_pctile: 0=all data (default), 50=top-half ADX trending only
     """
     total_start = time.time()
     df, feature_cols = load_and_prepare(csv_path)
     device = detect_gpu()
+
+    # Auto-configure based on hardware
+    gpu_available = device != "cpu"
+    if n_trials is None:
+        n_trials = 250 if gpu_available else 100
+    if use_deep is None:
+        use_deep = gpu_available
+
+    print(f"Hardware: {device} → n_trials={n_trials}, deep_learning={'ON' if use_deep else 'OFF'} (auto)")
 
     print(f"Total samples: {len(df)}")
     print(f"Base features: {len(feature_cols)}")
@@ -701,12 +711,27 @@ def train_model(csv_path: str, train_ratio: float = 0.8, n_trials: int = 100,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train XGBoost (+ optional LSTM/CNN) for LONG/SHORT prediction")
+    parser = argparse.ArgumentParser(
+        description="Train XGBoost (+ optional LSTM/CNN) for LONG/SHORT prediction",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Auto-detection behaviour (when flags not specified):
+  GPU detected  →  --n-trials 300, --deep-learning ON
+  CPU only      →  --n-trials 100, --deep-learning OFF
+
+Override examples:
+  python train.py --csv data/AAPL_*.csv                    # auto
+  python train.py --csv data/AAPL_*.csv --n-trials 200     # override trials
+  python train.py --csv data/AAPL_*.csv --no-deep          # force no deep
+        """
+    )
     parser.add_argument("--csv", type=str, required=True, help="Path to CSV from fetch_stock_data.py")
-    parser.add_argument("--train-ratio", type=float, default=0.9, help="Train/test split ratio")
-    parser.add_argument("--n-trials", type=int, default=100, help="Number of Optuna trials")
-    parser.add_argument("--deep-learning", action="store_true",
-                        help="Add LSTM+CNN deep features (requires PyTorch, GPU recommended)")
+    parser.add_argument("--n-trials", type=int, default=None,
+                        help="Optuna trials (default: 300 on GPU, 100 on CPU)")
+    parser.add_argument("--deep-learning", action="store_true", default=None,
+                        help="Force enable LSTM+CNN deep features")
+    parser.add_argument("--no-deep", action="store_true",
+                        help="Force disable LSTM+CNN deep features")
     parser.add_argument("--min-adx-pctile", type=float, default=0.0,
                         help="Only train on trending regimes: 0=all (default), 50=top half ADX")
     args = parser.parse_args()
@@ -716,7 +741,15 @@ def main():
         print(f"Run first: python fetch_stock_data.py --ticker AAPL")
         return
 
-    train_model(args.csv, args.train_ratio, args.n_trials, args.deep_learning, args.min_adx_pctile)
+    # Resolve deep-learning flag: --no-deep overrides --deep-learning
+    if args.no_deep:
+        use_deep = False
+    elif args.deep_learning:
+        use_deep = True
+    else:
+        use_deep = None  # auto
+
+    train_model(args.csv, 0.8, args.n_trials, use_deep, args.min_adx_pctile)
 
 
 if __name__ == "__main__":
