@@ -857,6 +857,7 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
     features_path  = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_features.txt")
     threshold_path = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_threshold.txt")
     perf_path      = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_perf.txt")
+    config_path    = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_config.json")
 
     # Score = edge at Optuna threshold on global test set
     new_score = opt["edge"]
@@ -872,6 +873,7 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
         print(f"\n✘ MODEL REJECTED — test WR {raw['wr']:.1f}% < {min_wr*100:.0f}% required")
         print(f"  Not saving. Run again with more trials, or use --force-save to override.")
     elif force_save or new_score > existing_score:
+        import json as _json
         model.save_model(model_path)
         joblib.dump(scaler, scaler_path)
         with open(features_path, "w") as f:
@@ -880,6 +882,8 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
             f.write(str(best_thresh))
         with open(perf_path, "w") as f:
             f.write(str(new_score))
+        with open(config_path, "w") as f:
+            _json.dump(model_params, f, indent=2)
         save_reason = "(force)" if force_save else f"(edge {new_score:+.3f}R > previous {existing_score:+.3f}R)"
         print(f"\n✔ MODEL SAVED {save_reason}")
         print(f"  Model:     {model_path}")

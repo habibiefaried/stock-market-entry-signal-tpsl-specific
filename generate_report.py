@@ -516,8 +516,14 @@ def main():
         "tradeable": tradeable,
     }
 
-    # Extract model config from saved model
-    params = model.get_params() or {}
+    # Load model config from saved config.json (saved by train.py alongside model)
+    import json as _json
+    config_path = model_path.replace("_model.json", "_config.json")
+    params = {}
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            params = _json.load(f)
+
     model_metrics = {
         "accuracy": accuracy,
         "precision_long": prec_long,
