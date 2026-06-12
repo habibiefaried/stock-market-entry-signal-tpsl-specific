@@ -183,8 +183,12 @@ def load_and_prepare(csv_path: str):
 # OPTIONAL: LSTM+CNN deep feature extraction
 # ──────────────────────────────────────────────
 
-def generate_deep_features(df, feature_cols, seq_len=15, epochs=30, lr=0.001):
-    """Train LSTM+CNN, extract 4 compressed deep features (LSTM_0/1, CNN_0/1)."""
+def generate_deep_features(df, feature_cols, seq_len=15, epochs=20, lr=0.001):
+    """Train ultra-light LSTM+CNN, extract 4 compressed deep features (LSTM_0/1, CNN_0/1).
+
+    Minimal architecture — 1 layer each, 2 output params, ~500 total parameters.
+    Trains in ~30s on GPU.
+    """
     try:
         import torch
         import torch.nn as nn
@@ -200,50 +204,41 @@ def generate_deep_features(df, feature_cols, seq_len=15, epochs=30, lr=0.001):
     if len(deep_input_cols) < 10:
         deep_input_cols = feature_cols[:30]
 
-    print(f"  Training LSTM+CNN ({len(deep_input_cols)} inputs, seq_len={seq_len}, epochs={epochs})...")
+    print(f"  Training ultra-light LSTM+CNN ({len(deep_input_cols)} inputs, seq_len={seq_len}, epochs={epochs})...")
 
     class LSTMFeat(nn.Module):
-        def __init__(self, n_in, hidden=64):
-            super().__init__()
-            self.lstm = nn.LSTM(n_in, hidden, num_layers=2, batch_first=True, dropout=0.2)
-            self.fc1 = nn.Linear(hidden, 32)
-            self.fc2 = nn.Linear(32, 8)
-            self.fc3 = nn.Linear(8, 2)
-        def forward(self, x):
-            _, (h_n, _) = self.lstm(x)
-            x = torch.relu(self.fc1(h_n[-1]))
-            x = torch.relu(self.fc2(x))
-            return self.fc3(x)
-
-    class CNNFeat(nn.Module):
+        """1-layer LSTM: hidden=8 -> 2 regime features."""
         def __init__(self, n_in):
             super().__init__()
-            self.conv1 = nn.Conv1d(n_in, 64, 3, padding=1)
-            self.conv2 = nn.Conv1d(64, 32, 3, padding=1)
-            self.conv3 = nn.Conv1d(32, 16, 3, padding=1)
+            self.lstm = nn.LSTM(n_in, 8, num_layers=1, batch_first=True)
+            self.fc = nn.Linear(8, 2)
+        def forward(self, x):
+            _, (h_n, _) = self.lstm(x)
+            return self.fc(h_n[-1])
+
+    class CNNFeat(nn.Module):
+        """1-layer CNN: 4 filters -> pool -> 2 pattern features."""
+        def __init__(self, n_in):
+            super().__init__()
+            self.conv = nn.Conv1d(n_in, 4, kernel_size=3, padding=1)
             self.pool = nn.AdaptiveAvgPool1d(1)
-            self.fc1 = nn.Linear(16, 8)
-            self.fc2 = nn.Linear(8, 2)
+            self.fc = nn.Linear(4, 2)
         def forward(self, x):
             x = x.transpose(1, 2)
-            x = torch.relu(self.conv1(x))
-            x = torch.relu(self.conv2(x))
-            x = torch.relu(self.conv3(x))
+            x = torch.relu(self.conv(x))
             x = self.pool(x).squeeze(-1)
-            x = torch.relu(self.fc1(x))
-            return self.fc2(x)
+            return self.fc(x)
 
     class CombinedExtractor(nn.Module):
+        """LSTM + CNN -> 4 features -> classifier."""
         def __init__(self, n_in):
             super().__init__()
             self.lstm = LSTMFeat(n_in)
             self.cnn = CNNFeat(n_in)
             self.classifier = nn.Linear(4, 2)
         def forward(self, x):
-            l = self.lstm(x)
-            c = self.cnn(x)
-            combined = torch.cat([l, c], dim=1)
-            return self.classifier(combined), combined
+            return self.classifier(torch.cat([self.lstm(x), self.cnn(x)], dim=1)), \
+                   torch.cat([self.lstm(x), self.cnn(x)], dim=1)
 
     feature_data = StandardScaler().fit_transform(
         df[deep_input_cols].values.astype(np.float64)
