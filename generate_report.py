@@ -447,13 +447,13 @@ def main():
     # Load + prepare data for test set evaluation and report
     df, _ = load_and_prepare(args.csv)
     n = len(df)
-    # Same 3-year chronological 80/10/10 split as train.py
+    # Same split as train.py: 9yr data, last 3 months = test
     dates = pd.to_datetime(df["Date"])
-    three_years_ago = dates.max() - pd.DateOffset(years=3)
-    df = df[dates >= three_years_ago].reset_index(drop=True)
-    n = len(df)
-    train_df = df[:int(n * 0.80)]
-    test_df  = df[int(n * 0.90):].reset_index(drop=True)
+    three_months_ago = dates.max() - pd.DateOffset(months=3)
+    test_mask = dates >= three_months_ago
+    pre_test_df = df[~test_mask].reset_index(drop=True)
+    test_df = df[test_mask].reset_index(drop=True)
+    train_df = pre_test_df[:int(len(pre_test_df) * 0.90)]
     print(f"Test set: {len(test_df)} samples ({test_df.iloc[0]['Date'][:10]} → {test_df.iloc[-1]['Date'][:10]})")
 
     X_test = test_df[feature_cols].values

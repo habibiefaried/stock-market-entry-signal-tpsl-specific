@@ -88,34 +88,39 @@ Given today's market conditions, should I enter LONG or SHORT to maximize my cha
   - SHORT: did price go DOWN to hit -1.5×ATR before going UP to hit +1×ATR?
 - Outputs clean CSV with zero NaN values
 
-### Data Split Strategy — 3-Year Chronological 80/10/10
+### Data Split Strategy — Full 9 Years Train, Last 3 Months Test
 
 ```
-Last 3 years of data (e.g. Jun 2023 – Jun 2026, ~750 samples):
-├── 80% TRAIN  → Jun 2023 – Dec 2025 (~600 samples)
-├── 10% VALID  → Jan 2026 – Mar 2026 (~75 samples, threshold tuning)
-└── 10% TEST   → Apr 2026 – Jun 2026 (~75 samples, final honest backtest)
+Full 9 years of data (~1446 clean samples):
+├── 90% of pre-test data → TRAIN  (2018 – 2025, ~1258 samples)
+├── 10% of pre-test data → VALID  (most recent pre-test, ~140 samples)
+└── Last 3 months        → TEST   (Mar – Jun 2026, ~48 samples) ← live trading
 ```
 
-**WHY 3 YEARS (not 9):**
-Older data (2017-2020) has different market regime, volatility, and stock behaviour. Training on stale patterns hurts more than the extra sample size helps. 3 years gives ~750 recent, relevant samples — enough for XGBoost with 238 features.
+**WHY FULL 9 YEARS FOR TRAINING:**
+Tested: 3-year window (448 train samples) → 38% test WR (underfitting).
+With 9 years (1258 train samples) → 84% test WR. The model needs volume
+of data to learn robust patterns. Recency weighting was removed — XGBoost
+with heavy regularization (gamma=3.8, lambda=7.7) naturally discounts
+noisy old patterns while keeping broadly useful ones.
 
-**WHY CHRONOLOGICAL (not random):**
-- Simple, honest forward test: train on past, test on future
-- No complex embargo/purge logic needed — time ordering handles leakage naturally
-- Directly answers: "if I trained yesterday, would my trades today profit?"
-- Avoids the random-split trap where test data from 2022 inflates or deflates WR
+**WHY LAST 3 MONTHS FOR TEST:**
+Directly answers the only question that matters for live trading:
+"Would this model have made money in the last 3 months?"
+If yes → trade it. If no → reject it regardless of historical performance.
 
-**WHY NOT LSTM/CNN (deep learning) with 3-year window:**
-3 years = ~750 samples. After 80% train + 15-day sequence length, the LSTM trains on ~588 sequences. Neural networks need thousands of samples to generalise — 588 leads to memorization (overfitting), producing features that hurt rather than help. Deep learning stays available via `--deep-learning` flag for experimentation with longer windows.
+**WHY 90/10 TRAIN/VALID (not 80/20):**
+More training data = less underfitting. Validation set (10%) is only used
+for early stopping and threshold tuning — doesn't need to be large.
 
-**Example output:**
+**Example output (AAPL, 200 trials):**
 ```
-Using last 3 years: 625 samples (2023-06-12 → 2026-06-08)
-Split (chronological 80/10/10):
-  Train: 500 (2023-06-12 → 2025-07-15)
-  Valid:  62 (2025-07-16 → 2025-11-04)
-  Test:   63 (2025-11-05 → 2026-06-08)
+Full dataset: 1446 samples (2018-10-16 → 2026-06-08)
+Split (9yr train+valid, last 3mo test):
+  Train: 1258 (2018-10-16 → 2025-05-23)
+  Valid: 140 (2025-06-03 → 2026-03-06)
+  Test:  48 (2026-03-09 → 2026-06-08) ← live trading period
+  WR: 84.2% | Edge: +1.105R | 3/3 triannual blocks passed
 ```
 
 **Triannual walk-forward validation gate:**

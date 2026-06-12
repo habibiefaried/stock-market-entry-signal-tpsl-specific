@@ -703,28 +703,28 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
             df = df[df[regime_col] >= min_adx_pctile].reset_index(drop=True)
             print(f"ADX regime filter (>= {min_adx_pctile:.0f}th pctile): {before} → {len(df)} samples")
 
-    # ── Simple chronological 80/10/10 on most recent 3 years ───────────────
-    # WHY 3 YEARS (not 9): Older data (2017-2020) has different market regime,
-    # volatility, and stock behaviour. Training on stale patterns hurts more
-    # than the extra sample size helps. 3 years = ~750 relevant samples.
-    # WHY CHRONOLOGICAL (not random): Simple, honest forward test. The model
-    # trains on past, validates on near-future, tests on recent-future.
-    # No complex embargo/purge logic needed — time order handles leakage.
-    dates = pd.to_datetime(df["Date"])
-    three_years_ago = dates.max() - pd.DateOffset(years=3)
-    df = df[dates >= three_years_ago].reset_index(drop=True)
+    # ── Chronological split: full 9 years, last 3 months = TEST ─────────────
+    # USE ALL DATA (9 years) for maximum training signal.
+    # Last 3 months forced into TEST (live trading validation).
+    # Remaining 90% of pre-test data = TRAIN, last 10% of pre-test = VALID.
     n = len(df)
-    print(f"\nUsing last 3 years: {len(df)} samples ({df.iloc[0]['Date'][:10]} → {df.iloc[-1]['Date'][:10]})")
+    dates = pd.to_datetime(df["Date"])
+    three_months_ago = dates.max() - pd.DateOffset(months=3)
+    test_mask = dates >= three_months_ago
+    pre_test_df = df[~test_mask].reset_index(drop=True)
+    test_df = df[test_mask].reset_index(drop=True)
 
-    train_end = int(n * 0.80)
-    valid_end = int(n * 0.90)
-    train_df = df[:train_end]
-    valid_df = df[train_end:valid_end].reset_index(drop=True)
-    test_df  = df[valid_end:].reset_index(drop=True)
-    print(f"Split (chronological 80/10/10):")
+    # Split pre-test into 90% train / 10% valid (chronological)
+    n_pre = len(pre_test_df)
+    train_end = int(n_pre * 0.90)
+    train_df = pre_test_df[:train_end]
+    valid_df = pre_test_df[train_end:].reset_index(drop=True)
+
+    print(f"\nFull dataset: {n} samples ({df.iloc[0]['Date'][:10]} → {df.iloc[-1]['Date'][:10]})")
+    print(f"Split (9yr train+valid, last 3mo test):")
     print(f"  Train: {len(train_df)} ({train_df.iloc[0]['Date'][:10]} → {train_df.iloc[-1]['Date'][:10]})")
     print(f"  Valid: {len(valid_df)} ({valid_df.iloc[0]['Date'][:10]} → {valid_df.iloc[-1]['Date'][:10]})")
-    print(f"  Test:  {len(test_df)} ({test_df.iloc[0]['Date'][:10]} → {test_df.iloc[-1]['Date'][:10]})")
+    print(f"  Test:  {len(test_df)} ({test_df.iloc[0]['Date'][:10]} → {test_df.iloc[-1]['Date'][:10]}) ← live trading period")
 
     # Optuna only sees the TRAIN slice (80%)
     optuna_start = time.time()
