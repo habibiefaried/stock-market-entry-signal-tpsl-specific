@@ -88,48 +88,34 @@ Given today's market conditions, should I enter LONG or SHORT to maximize my cha
   - SHORT: did price go DOWN to hit -1.5×ATR before going UP to hit +1×ATR?
 - Outputs clean CSV with zero NaN values
 
-### Data Split Strategy — Random Train + Forced Recent Test
+### Data Split Strategy — 3-Year Chronological 80/10/10
 
 ```
-Full 9 years → group by month:
-├── Last 3 months → FORCED into TEST  (always recent — "does model work NOW?")
-├── Remaining months → randomly assign:
-│   ├── ~85% → TRAIN  (diverse months from ALL years/regimes)
-│   └── ~15% → VALID  (random months, for threshold tuning)
-└── ±5 day embargo at block boundaries prevents temporal leakage
+Last 3 years of data (e.g. Jun 2023 – Jun 2026, ~750 samples):
+├── 80% TRAIN  → Jun 2023 – Dec 2025 (~600 samples)
+├── 10% VALID  → Jan 2026 – Mar 2026 (~75 samples, threshold tuning)
+└── 10% TEST   → Apr 2026 – Jun 2026 (~75 samples, final honest backtest)
 ```
 
-**WHY FORCED RECENT TEST:**
-If test months are randomly scattered, 2026 data might end up in training — you'd never see how the model performs on today's market. Forcing the last 3 months into test guarantees the backtest directly answers: "if I trade this model starting today, what happens?"
+**WHY 3 YEARS (not 9):**
+Older data (2017-2020) has different market regime, volatility, and stock behaviour. Training on stale patterns hurts more than the extra sample size helps. 3 years gives ~750 recent, relevant samples — enough for XGBoost with 238 features.
 
-**WHY RANDOM TRAIN/VALID (not chronological):**
-XGBoost treats each row independently — it doesn't care about order. Each row already has temporal context via lag features (Return_Lag_1, MACD_Hist_Lag_5, etc). A chronological split asks "do 2018 patterns predict 2026?" (often no). Random assignment ensures training sees ALL regimes (bull, bear, crash, recovery).
+**WHY CHRONOLOGICAL (not random):**
+- Simple, honest forward test: train on past, test on future
+- No complex embargo/purge logic needed — time ordering handles leakage naturally
+- Directly answers: "if I trained yesterday, would my trades today profit?"
+- Avoids the random-split trap where test data from 2022 inflates or deflates WR
 
-**WHY MONTHLY BLOCKS:**
-- Individual sample scatter + embargo destroys 67% of data
-- Monthly blocks keep adjacent days together — embargo only at boundaries
-- Only ~9% data loss from embargo
-
-**WHY ±5 DAY EMBARGO:**
-- Adjacent samples share overlapping TP/SL label windows (both look forward 10 days)
-- Their features are nearly identical (autocorrelated RSI, MACD etc)
-- Buffer at month boundaries removes this leakage
-- Based on Marcos Lopez de Prado's "Advances in Financial Machine Learning"
-
-**Test window: ~9 months staggered across 5 time periods:**
-- 3 months from this year (most recent — answers "does model work NOW?")
-- 3 months from last year (different regime)
-- 1 month from each of 3 prior years (2, 3, 4 years ago)
-
-WHY NOT just 3 recent months: if Apr–Jun 2026 is all bullish, naive "always LONG" = 81% WR — any model looks good. Staggering across 5 periods ensures bull, bear, and sideways are all represented → honest WR that can't be gamed by regime luck.
+**WHY NOT LSTM/CNN (deep learning) with 3-year window:**
+3 years = ~750 samples. After 80% train + 15-day sequence length, the LSTM trains on ~588 sequences. Neural networks need thousands of samples to generalise — 588 leads to memorization (overfitting), producing features that hurt rather than help. Deep learning stays available via `--deep-learning` flag for experimentation with longer windows.
 
 **Example output:**
 ```
-Split (random train/valid + forced recent test, embargo ±5 days):
-  Train: 988 (random months from all years)
-  Valid: 196 (random months, for threshold tuning)
-  Test:  127 (staggered: 2022-04 → 2026-06, from 5 distinct periods)
-  Embargo: 135 samples purged (9.3%)
+Using last 3 years: 625 samples (2023-06-12 → 2026-06-08)
+Split (chronological 80/10/10):
+  Train: 500 (2023-06-12 → 2025-07-15)
+  Valid:  62 (2025-07-16 → 2025-11-04)
+  Test:   63 (2025-11-05 → 2026-06-08)
 ```
 
 **Triannual walk-forward validation gate:**

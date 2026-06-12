@@ -672,7 +672,7 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
     if n_trials is None:
         n_trials = 250 if gpu_available else 100
     if use_deep is None:
-        use_deep = gpu_available
+        use_deep = False  # 3-year window = too few samples for LSTM/CNN to generalise
 
     print(f"Hardware: {device} → n_trials={n_trials}, deep_learning={'ON' if use_deep else 'OFF'} (auto)")
     print(f"Total samples: {len(df)}")
@@ -703,18 +703,28 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
             df = df[df[regime_col] >= min_adx_pctile].reset_index(drop=True)
             print(f"ADX regime filter (>= {min_adx_pctile:.0f}th pctile): {before} → {len(df)} samples")
 
-    # ── Purged random split: recent 3 months forced to TEST ─────────────────
-    # Training sees diverse months from all years (random) for regime coverage.
-    # Test is ALWAYS the most recent 3 months — answers "does model work NOW?"
+    # ── Simple chronological 80/10/10 on most recent 3 years ───────────────
+    # WHY 3 YEARS (not 9): Older data (2017-2020) has different market regime,
+    # volatility, and stock behaviour. Training on stale patterns hurts more
+    # than the extra sample size helps. 3 years = ~750 relevant samples.
+    # WHY CHRONOLOGICAL (not random): Simple, honest forward test. The model
+    # trains on past, validates on near-future, tests on recent-future.
+    # No complex embargo/purge logic needed — time order handles leakage.
+    dates = pd.to_datetime(df["Date"])
+    three_years_ago = dates.max() - pd.DateOffset(years=3)
+    df = df[dates >= three_years_ago].reset_index(drop=True)
     n = len(df)
-    train_df, valid_df, test_df = purged_random_split(df, valid_frac=0.15, n_test_months=3)
-    n_embargo = n - len(train_df) - len(valid_df) - len(test_df)
-    test_dates = pd.to_datetime(test_df["Date"])
-    print(f"\nSplit (random train/valid + forced recent test, embargo ±5 days):")
-    print(f"  Train: {len(train_df)} (random months from all years)")
-    print(f"  Valid: {len(valid_df)} (random months, for threshold tuning)")
-    print(f"  Test:  {len(test_df)} (last 3 months: {test_dates.min().strftime('%Y-%m-%d')} → {test_dates.max().strftime('%Y-%m-%d')})")
-    print(f"  Embargo: {n_embargo} samples purged ({n_embargo/n*100:.1f}%)")
+    print(f"\nUsing last 3 years: {len(df)} samples ({df.iloc[0]['Date'][:10]} → {df.iloc[-1]['Date'][:10]})")
+
+    train_end = int(n * 0.80)
+    valid_end = int(n * 0.90)
+    train_df = df[:train_end]
+    valid_df = df[train_end:valid_end].reset_index(drop=True)
+    test_df  = df[valid_end:].reset_index(drop=True)
+    print(f"Split (chronological 80/10/10):")
+    print(f"  Train: {len(train_df)} ({train_df.iloc[0]['Date'][:10]} → {train_df.iloc[-1]['Date'][:10]})")
+    print(f"  Valid: {len(valid_df)} ({valid_df.iloc[0]['Date'][:10]} → {valid_df.iloc[-1]['Date'][:10]})")
+    print(f"  Test:  {len(test_df)} ({test_df.iloc[0]['Date'][:10]} → {test_df.iloc[-1]['Date'][:10]})")
 
     # Optuna only sees the TRAIN slice (80%)
     optuna_start = time.time()
