@@ -229,11 +229,55 @@ Tested on AAPL, NFLX, AMD (9 years data, 100 Optuna trials each):
 - Shows: verdict, equity curve, MC probability distribution, feature importance
 
 ### Live Decision (current.py)
-- Loads latest trained model
-- Fetches recent market data for indicator computation
-- Predicts direction from last completed candle's indicators
-- Calculates TP/SL levels and % based on your current entry price + ATR
-- Shows position sizing table
+
+**Why you only need to supply a current price:**
+
+The model was trained on *completed* daily candles — Open, High, Low, Close are all known. When you enter the traderoom, today's candle is still forming so it can't be used as a feature. Instead `current.py` does this:
+
+```
+Step 1: Load model
+        ↓ reads models/{TICKER}_{date}_xgboost_model.json
+        ↓ reads matching _scaler.pkl and _features.txt
+
+Step 2: Fetch recent historical data (14 months)
+        ↓ Yahoo Finance → OHLCV for last 14 months
+        ↓ Compute 170+ technical indicators
+        ↓ Run same load_and_prepare() pipeline as training
+          (lag features, regime percentiles, interactions, calendar)
+        ↓ The LAST COMPLETED candle is the most recent full trading day
+
+Step 3: Predict direction using last completed candle's indicators
+        ↓ model.predict_proba(last_candle_features) → [P(SHORT), P(LONG)]
+        ↓ direction = argmax(probabilities)
+        ↓ confidence = max probability
+        Note: the prediction is "if I enter NOW, should I go LONG or SHORT?"
+              It uses yesterday's completed indicators as signal
+
+Step 4: Calculate TP/SL from YOUR current price (not last close)
+        ↓ ATR comes from last completed candle (the most recent valid ATR)
+        ↓ LONG: TP = current_price + 1.5×ATR, SL = current_price - 1.0×ATR
+        ↓ SHORT: TP = current_price - 1.5×ATR, SL = current_price + 1.0×ATR
+        Note: we use YOUR price for levels because that's your actual entry,
+              not yesterday's close price
+
+Step 5: Position sizing table
+        ↓ risk_per_share = |current_price - sl_price|
+        ↓ shares = risk_budget / risk_per_share
+        ↓ printed for 1%, 2%, 3%, 5% of $10,000 capital
+```
+
+**Example:**
+```
+Last completed candle: 2026-06-09 | Close: $290.55
+ATR(14): $7.51
+↓ model sees June 9's indicators → predicts SHORT (58% confidence)
+
+You enter: current price = $292.45
+↓ SHORT TP = 292.45 - 1.5×7.51 = $281.19  (-3.8%)
+↓ SHORT SL = 292.45 + 1.0×7.51 = $299.96  (+2.6%)
+```
+
+The key insight: **indicators tell you the direction, your current price determines the exact dollar levels.**
 
 ## Key Concepts
 
