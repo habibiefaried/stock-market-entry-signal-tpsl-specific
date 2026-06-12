@@ -28,6 +28,9 @@ python train.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --no-deep
 # Override: custom trial count
 python train.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --n-trials 200
 
+# Override: sequential Optuna (default: 2 parallel GPU workers)
+python train.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --n-jobs 1
+
 # 3. Live trade decision (enter your current price)
 python current.py --ticker AAPL --price 292.45
 
@@ -44,6 +47,10 @@ python ranking.py --deep-learning         # use LSTM+CNN experimental model
 # ADX trending filter (not recommended as default — see experiments below)
 python train.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --min-adx-pctile 50
 python ranking.py --min-adx-pctile 50
+
+# Parallel Optuna workers (GPU: 2-4 concurrent XGBoost models)
+python train.py --csv data/AAPL_*.csv --n-jobs 4    # aggressive
+python train.py --csv data/AAPL_*.csv --n-jobs 1    # sequential
 
 # Tighter TP/SL label window (default 10 days, try 5 for faster signals)
 python fetch_stock_data.py --ticker AAPL --lookahead 5
