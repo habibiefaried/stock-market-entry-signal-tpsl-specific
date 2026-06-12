@@ -197,7 +197,7 @@ python train.py --csv data/AAPL_*.csv --force-save
 - Chronological train/test split (90/10) — never peeks at future
 - Auto-detects NVIDIA GPU (`device='cuda'`)
 - **Optuna Bayesian hyperparameter tuning is mandatory** — always runs, no manual params needed
-- **XGBoostPruningCallback** kills bad trials mid-training (per-tree level)
+- **MedianPruner** kills bottom-half trials at fold-level, saving ~30% tuning time
 - **MedianPruner** skips unpromising trials early, saving time
 - **Decision threshold optimization** finds the best LONG/SHORT boundary (not locked at 0.50)
 
@@ -207,13 +207,13 @@ An experimental variant that adds 4 learned features from a deep neural network:
 
 | Component | Spec | Purpose |
 |-----------|------|---------|
-| LSTM | 2-layer 64-hidden → fc32 → fc8 → **2 output** | Regime encoding (bullish/bearish phase) |
-| CNN | 3-layer conv 64→32→16 → fc8 → **2 output** | Pattern encoding (non-linear signals) |
+| LSTM | 1-layer hidden=8 → **2 output** | Regime encoding (bullish/bearish phase) |
+| CNN | 1-layer conv 4 filters → pool → **2 output** | Pattern encoding (non-linear signals) |
 | Input | 15-day × ~60 key indicators | Key oscillators/ratios only |
-| Training | 30 epochs, CUDA, Adam, CrossEntropyLoss | ~2 min on GPU |
-| XGBoost | Same config as `train.py` | Optuna + XGBoostPruningCallback, 500-15000 trees, lr 0.0005-0.2 |
+| Training | 20 epochs, CUDA, Adam, CrossEntropyLoss | ~30s on GPU |
+| Total params | ~500 | Ultra-light, no overfitting risk |
 
-**Total deep features: 4** (LSTM_0, LSTM_1, CNN_0, CNN_1) — deeper network compresses temporal patterns into a tight bottleneck rather than passing through 24 noisy activations.
+**Total deep features: 4** (LSTM_0, LSTM_1, CNN_0, CNN_1) — minimal bottleneck compresses temporal patterns without overfitting.
 
 **Why it underperforms in backtest/Monte Carlo despite higher Optuna WR:**
 
