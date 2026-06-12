@@ -171,6 +171,8 @@ def load_and_prepare(csv_path: str):
         "Volume_SMA_20", "Wilder_MA_14", "Chaikin_Osc", "DMA_20_5",
         "EMV", "EMV_Signal",
         "CCI", "KST", "KST_Signal", "Chaikin_Vol",
+        # New: Klinger raw (dollar-scale), keep KVO_Norm and KVO_Signal
+        "vf_series",
     ]
     feature_cols = [c for c in df.columns if c not in exclude_cols]
     df = df.copy()
@@ -430,17 +432,26 @@ def _backtest_at_threshold(df_set, y_pred, y_prob, threshold):
             "skipped": skipped, "final_r": cumulative_r, "equity": equity_curve}
 
 
-def _find_best_threshold_optuna(df_valid, y_pred_valid, y_prob_valid, n_trials=30):
+def _find_best_threshold_optuna(df_valid, y_pred_valid, y_prob_valid, n_trials=40):
     """
-    Use Optuna to find the confidence threshold that maximises edge on validation set.
-    Searches 0.45–0.80. Uses validation set (never the test set).
+    Use Optuna to find the confidence threshold that maximises risk-adjusted edge
+    on the validation set.
+
+    Scoring = edge × sqrt(n_trades / 20)
+      - Rewards high edge
+      - Penalises statistically thin results (< 20 trades → score scaled down)
+      - Prevents overfitting to lucky 5-trade streaks at very high thresholds
+    Min 20 trades required to return a positive score.
     """
     def objective(trial):
-        thresh = trial.suggest_float("threshold", 0.45, 0.80)
+        thresh = trial.suggest_float("threshold", 0.45, 0.75)
         result = _backtest_at_threshold(df_valid, y_pred_valid, y_prob_valid, thresh)
-        if result["total"] < 10:
-            return 0.0  # not enough trades to be meaningful
-        return result["edge"]
+        n = result["total"]
+        if n < 20:
+            return 0.0  # not enough trades — statistically meaningless
+        # Scale down edge by sqrt(n/20): rewards confidence with sample size
+        statistical_weight = np.sqrt(n / 20.0)
+        return result["edge"] * statistical_weight
 
     study = optuna.create_study(direction="maximize")
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)

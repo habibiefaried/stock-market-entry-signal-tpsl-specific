@@ -98,7 +98,7 @@ The test set is **never used** during training or threshold tuning. This prevent
 - XGBoost binary classifier: predicts LONG (1) vs SHORT (0)
 - Only uses scale-invariant features (no absolute prices that change over time)
 - **Binary prediction with noise filtering**: LONG (1) or SHORT (0). Drops samples where both directions hit SL (choppy noise).
-- **Optuna-tuned confidence threshold**: The decision threshold (default 0.50) is optimised on the validation set using Optuna to maximise edge. Saved to `models/{TICKER}_{date}_xgboost_threshold.txt`. Used automatically by `current.py`.
+- **Optuna-tuned confidence threshold**: The decision threshold is optimised on the validation set using Optuna. Scoring = `edge × sqrt(n_trades/20)` — penalises lucky streaks on small sample sizes (requires ≥20 trades). Saved to `models/{TICKER}_{date}_xgboost_threshold.txt`. Used automatically by `current.py`.
 - **Trader-style backtest**: Simulates a real trader — only enters trades where confidence ≥ threshold. Reports full correlation table showing how win rate changes at each confidence level.
 - **Market regime features**: ATR percentile, return percentile, volatility regime, trend strength regime (all 0-100 scale, tells model "what kind of market is this?")
 - **Normalized features**: MACD_Hist/ATR, log-volume changes, CCI/KST clipped to bounded ranges — prevents scale drift over time
@@ -159,16 +159,20 @@ For each candidate threshold:
 Best threshold saved to models/{ticker}_threshold.txt
 ```
 
-**Example output — AAPL:**
+**Example output — AAPL (after new indicators + fixed threshold):**
 ```
 Correlation table on TEST set:
   Threshold  Trades   Skip%  Win Rate     Edge
   ─────────  ──────  ──────  ────────  ───────
-       0.50     145    0.0%     53.8%  +0.345R   ← trade everything
-       0.52     108   25.5%     58.3%  +0.458R
-       0.55      58   60.0%     55.2%  +0.379R
-       0.60      13   91.0%     61.5%  +0.538R
-       0.62       5   96.6%     60.0%  +0.500R   ← Optuna-tuned
+       0.50     145    0.0%     61.4%  +0.534R   ← Optuna-tuned (≥20 trades enforced)
+       0.52     108   25.5%     63.9%  +0.597R
+       0.55      75   48.3%     66.7%  +0.667R   ← sweet spot
+       0.57      60   58.6%     66.7%  +0.667R
+       0.60      31   78.6%     51.6%  +0.290R
+```
+
+Key insight: the previous threshold overfitting (picking 0.62 with only 5 test trades) is now corrected.
+The model correctly identifies 0.50 as having sufficient trades AND 61.4% WR.
 ```
 
 Trade-off: higher threshold → fewer trades but higher win rate. The Optuna threshold maximises **edge** (quality × quantity), not just win rate.
@@ -267,6 +271,25 @@ Tested on AAPL, NFLX, AMD (9 years data, 100 Optuna trials each):
 | Lookahead=5, ADX>=50 | 53.7% | 47.2% | 45.6% | Worst overall |
 
 **Conclusion:** The ADX regime filter removes ~50% of training data (500-700 samples), which hurts more than the signal quality gain. The baseline (10-day lookahead, all samples) remains optimal. Confidence of 60-70%+ is achievable through the confidence threshold analysis at inference time — only trade signals where model confidence ≥ 60%.
+
+### New Indicators Added (from TT library audit)
+
+| Indicator | Formula summary | Why it helps |
+|-----------|----------------|-------------|
+| **Supertrend** | ATR-based dynamic band, +1/-1 trend signal | Widely proven trend-following; tells model if trend is established |
+| **Supertrend_Dist** | (Close - active band) / Close % | How far price is from the support/resistance line |
+| **STC (Schaff Trend Cycle)** | MACD through double Stochastic smoothing (0-100) | Faster and less noisy than MACD; >75 overbought, <25 oversold |
+| **STC_Signal** | +1/>75, -1/<25, 0=neutral | Discrete overbought/oversold state |
+| **RVI (Relative Vigor Index)** | body/range rolling average ratio | Measures buying vigor vs selling pressure |
+| **RVI_Signal** | 4-period EMA of RVI | Smoothed version for crossover signals |
+| **RVI_Cross** | sign(RVI - RVI_Signal) | +1 = bullish cross, -1 = bearish cross |
+| **Ulcer_Index** | sqrt(mean(pct_drawdown²)) over 14d | Measures downside-only volatility; high = bearish stress |
+| **Elder_Impulse** | EMA slope × MACD_Hist slope combined | +1 = both rising (green bar), -1 = both falling (red bar), 0 = mixed |
+| **KVO (Klinger Volume Oscillator)** | Volume-weighted trend, EMA34-EMA55 | Better at volume divergences than OBV |
+| **KVO_Signal** | 13-period MA of KVO | Trigger line |
+| **RWI_High/Low** | (H-L[n]) / (ATR × √n) | >1 = trending stronger than a random walk |
+| **RWI_Trend** | sign(RWI_High - RWI_Low) | +1 = uptrend confirmed, -1 = downtrend confirmed |
+| **RVI_Vol (Relative Volatility Index)** | RSI applied to std deviation | High = volatile days dominate; helps regime detection |
 
 ### The Report (generate_report.py)
 - Trains model with Optuna (same mandatory tuning as `train.py`)

@@ -550,6 +550,115 @@ def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["Dist_High_50"] = (high.rolling(50).max() - close) / close * 100
     df["Dist_Low_50"] = (close - low.rolling(50).min()) / close * 100
 
+    # === Supertrend ===
+    # Uses ATR-based bands to define dynamic support/resistance and trend direction.
+    # +1 = price above upper band (uptrend), -1 = price below lower band (downtrend)
+    st_period = 10
+    st_mult = 3.0
+    st_atr = compute_atr(df, st_period)
+    hl2 = (high + low) / 2
+    st_upper_raw = hl2 + st_mult * st_atr
+    st_lower_raw = hl2 - st_mult * st_atr
+
+    st_upper = st_upper_raw.copy()
+    st_lower = st_lower_raw.copy()
+    supertrend = pd.Series(0.0, index=df.index)
+
+    for i in range(1, len(df)):
+        st_upper.iloc[i] = st_upper_raw.iloc[i] if (st_upper_raw.iloc[i] < st_upper.iloc[i-1] or close.iloc[i-1] > st_upper.iloc[i-1]) else st_upper.iloc[i-1]
+        st_lower.iloc[i] = st_lower_raw.iloc[i] if (st_lower_raw.iloc[i] > st_lower.iloc[i-1] or close.iloc[i-1] < st_lower.iloc[i-1]) else st_lower.iloc[i-1]
+        if close.iloc[i] > st_upper.iloc[i]:
+            supertrend.iloc[i] = 1.0
+        elif close.iloc[i] < st_lower.iloc[i]:
+            supertrend.iloc[i] = -1.0
+        else:
+            supertrend.iloc[i] = supertrend.iloc[i-1]
+
+    df["Supertrend"] = supertrend
+    # Distance from the active Supertrend band (positive = above support, negative = below resistance)
+    dist_from_lower = (close - st_lower) / close * 100
+    dist_from_upper = (close - st_upper) / close * 100
+    df["Supertrend_Dist"] = np.where(supertrend >= 0, dist_from_lower.fillna(0), dist_from_upper.fillna(0))
+
+    # === Schaff Trend Cycle (STC) ===
+    # MACD run through double-smoothed Stochastic — faster and less noisy than MACD alone.
+    # Output 0-100: above 75 = overbought, below 25 = oversold.
+    def _stoch(series, period):
+        lo = series.rolling(period).min()
+        hi = series.rolling(period).max()
+        return 100 * (series - lo) / (hi - lo).replace(0, np.nan).fillna(1)
+
+    stc_fast, stc_slow, stc_cycle = 23, 50, 10
+    stc_macd = close.ewm(span=stc_fast, adjust=False).mean() - close.ewm(span=stc_slow, adjust=False).mean()
+    stc_k1 = _stoch(stc_macd, stc_cycle).fillna(50)
+    stc_d1 = stc_k1.ewm(span=3, adjust=False).mean()
+    stc_k2 = _stoch(stc_d1, stc_cycle).fillna(50)
+    df["STC"] = stc_k2.ewm(span=3, adjust=False).mean()
+    df["STC_Signal"] = np.where(df["STC"] > 75, 1, np.where(df["STC"] < 25, -1, 0))
+
+    # === Relative Vigor Index (RVI) ===
+    # Compares close-open (body) to high-low (range): measures buying vs selling vigor.
+    # Positive = bullish vigor, negative = bearish vigor.
+    rvi_num = (close - df["Open"]).rolling(4).mean()
+    rvi_den = (high - low).rolling(4).mean()
+    rvi_den = rvi_den.replace(0, np.nan).ffill()
+    df["RVI"] = rvi_num / rvi_den
+    df["RVI_Signal"] = df["RVI"].rolling(4).mean()
+    df["RVI_Cross"] = np.sign(df["RVI"] - df["RVI_Signal"]).fillna(0).astype(int)
+
+    # === Ulcer Index ===
+    # Measures downside volatility only (drawdown from recent peak).
+    # High = significant drawdowns occurring = bearish stress.
+    ulcer_period = 14
+    rolling_max = close.rolling(ulcer_period).max()
+    pct_drawdown = ((close - rolling_max) / rolling_max * 100) ** 2
+    df["Ulcer_Index"] = np.sqrt(pct_drawdown.rolling(ulcer_period).mean())
+
+    # === Elder Impulse System ===
+    # Combines EMA slope (trend) + MACD histogram (momentum) into 3-state signal:
+    # +1 = bullish impulse (both rising), -1 = bearish impulse (both falling), 0 = mixed
+    ema13 = close.ewm(span=13, adjust=False).mean()
+    ema13_slope = np.sign(ema13 - ema13.shift(1))
+    macd_slope = np.sign(df["MACD_Hist"] - df["MACD_Hist"].shift(1))
+    ema13_slope = ema13_slope.fillna(0)
+    macd_slope = macd_slope.fillna(0)
+    df["Elder_Impulse"] = np.where((ema13_slope == 1) & (macd_slope == 1), 1,
+                          np.where((ema13_slope == -1) & (macd_slope == -1), -1, 0))
+
+    # === Klinger Volume Oscillator (KVO) ===
+    # Volume-weighted momentum: compares volume on up vs down days across different EMAs.
+    # Better at spotting divergences than OBV.
+    dm = high - low
+    cm = dm.copy()
+    for i in range(1, len(df)):
+        cm.iloc[i] = cm.iloc[i-1] + dm.iloc[i] if (high.iloc[i] + low.iloc[i] + close.iloc[i]) >= (high.iloc[i-1] + low.iloc[i-1] + close.iloc[i-1]) else dm.iloc[i]
+    trend_kvo = np.where(close > close.shift(1), 1, -1)
+    vf = volume * abs(2 * dm / cm - 1) * trend_kvo * 100
+    vf_series = pd.Series(vf.values if hasattr(vf, 'values') else vf, index=df.index).fillna(0)
+    kvo = vf_series.ewm(span=34, adjust=False).mean() - vf_series.ewm(span=55, adjust=False).mean()
+    df["KVO"] = kvo / volume.rolling(20).mean()
+    df["KVO_Signal"] = df["KVO"].rolling(13).mean()
+
+    # === Random Walk Index (RWI) ===
+    # Measures if price is trending more than a random walk.
+    # RWI_High > 1 = uptrend stronger than random, RWI_Low > 1 = downtrend stronger than random.
+    rwi_period = 14
+    atr_rwi = compute_atr(df, 1)
+    atr_rwi_scaled = atr_rwi * np.sqrt(rwi_period)
+    df["RWI_High"] = (high - low.shift(rwi_period)) / atr_rwi_scaled.replace(0, np.nan).fillna(1)
+    df["RWI_Low"] = (high.shift(rwi_period) - low) / atr_rwi_scaled.replace(0, np.nan).fillna(1)
+    df["RWI_Trend"] = np.where(df["RWI_High"] > df["RWI_Low"], 1, -1)
+
+    # === Relative Volatility Index (RVI_Vol) ===
+    # RSI applied to standard deviation instead of price change.
+    # High = high volatility days dominate, Low = calm market.
+    std14 = close.rolling(10).std()
+    delta_std = std14.diff()
+    gain_std = delta_std.where(delta_std > 0, 0.0).rolling(14).mean()
+    loss_std = (-delta_std).where(delta_std < 0, 0.0).rolling(14).mean()
+    rs_vol = gain_std / loss_std.replace(0, np.nan).fillna(1)
+    df["RVI_Vol"] = 100 - (100 / (1 + rs_vol))
+
     # === Chande Momentum Oscillator (CMO) ===
     delta = close.diff()
     gain_sum = delta.where(delta > 0, 0.0).rolling(14).sum()
