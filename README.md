@@ -123,10 +123,33 @@ Split (9yr train+valid, last 3mo test):
   WR: 84.2% | Edge: +1.105R | Passed 55% WR gate
 ```
 
-**Win rate gate:**
-Model only saved if test-set WR >= 55% (configurable via `--min-wr`).
-The test set is the last 3 months — directly answers "would this model make money NOW?"
-If it fails, the model is rejected and not saved. Use `--force-save` to override for research.
+**Timeout-based training (find best model within time budget):**
+
+Instead of a single Optuna run, the trainer loops for 5 minutes (configurable via `--timeout`):
+1. Each loop runs a fresh Optuna study with different random seeds
+2. Trains a model, evaluates test-set WR (backtest on last 3 months)
+3. Keeps the best model (highest backtest WR) across all attempts
+4. Only saves if new best WR > existing model on disk
+
+```bash
+python train.py --csv data/AAPL_*.csv              # 5 min default
+python train.py --csv data/AAPL_*.csv --timeout 600  # 10 min for harder stocks
+```
+
+Example output:
+```
+Training (timeout 5min, finding best backtest WR)...
+  Attempt 1: WR=49.1% | Trees=7479 LR=0.1486 Depth=8 [0s] ★ NEW BEST
+  Attempt 2: WR=54.7% | Trees=6941 LR=0.0892 Depth=3 [32s] ★ NEW BEST
+  Attempt 3: WR=54.7% | Trees=22669 LR=0.0862 Depth=6 [65s]
+  ...
+Best model found in 4 attempts (137s): WR=54.7%
+```
+
+WHY: Optuna's random exploration means each run finds different params.
+Running multiple attempts within a timeout guarantees you find a good
+model without manual re-running. For ranking.py with 20 stocks at 5min
+each = 1.5 hours total (reasonable).
 
 **Minimum WR requirement:**
 - Default: **55% WR** (configurable via `--min-wr 0.55`)

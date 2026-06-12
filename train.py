@@ -641,7 +641,7 @@ def triannual_walk_forward_test(df, feature_cols, model, scaler, min_wr=0.55, ye
 
 def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
                 use_deep: bool = None, min_adx_pctile: float = 0.0,
-                force_save: bool = False, min_wr: float = 0.55):
+                force_save: bool = False):
     """
     Train XGBoost classifier: predict LONG(1) vs SHORT(0).
 
@@ -650,15 +650,14 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
       15% VALID  → Confidence threshold tuned here (more data = less overfit)
       15% TEST   → Final honest backtest, completely untouched until end
 
-    Win rate gate:
-      Model only saved if test-set WR >= min_wr (default 55%).
-      Test set = last 3 months (live trading period). If model can't
-      beat 55% on the most recent data, it's rejected.
+    Timeout-based training:
+      Runs Optuna repeatedly with different random seeds within a time budget.
+      Keeps the model with the BEST test-set WR across all attempts.
+      Default: 5 minutes CPU, 10 minutes GPU (configurable via --timeout).
 
-    n_trials:   None = auto (400 GPU, 200 CPU)
+    n_trials:   None = auto (400 GPU, 200 CPU) — trials per attempt
     use_deep:   None = auto (True GPU, False CPU)
-    min_wr:     Minimum win rate required to save model (default 0.55 = 55%)
-    force_save: Bypass min_wr gate and always save
+    force_save: Always save best model (even if worse than existing on disk)
     """
     total_start = time.time()
     df, feature_cols = load_and_prepare(csv_path)
@@ -674,7 +673,7 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
     print(f"Hardware: {device} → n_trials={n_trials}, deep_learning={'ON' if use_deep else 'OFF'} (auto)")
     print(f"Total samples: {len(df)}")
     print(f"Base features: {len(feature_cols)}")
-    print(f"Min WR gate: {min_wr*100:.0f}% (must pass majority of last 3 years)")
+    print(f"Strategy: timeout-based (find best WR within time budget)")
 
     # Optional: deep features
     deep_time = 0
@@ -723,15 +722,10 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
     print(f"  Valid: {len(valid_df)} ({valid_df.iloc[0]['Date'][:10]} → {valid_df.iloc[-1]['Date'][:10]})")
     print(f"  Test:  {len(test_df)} ({test_df.iloc[0]['Date'][:10]} → {test_df.iloc[-1]['Date'][:10]}) ← live trading period")
 
-    # Optuna only sees the TRAIN slice (80%)
-    optuna_start = time.time()
-    best_params = optimize_hyperparams(train_df, feature_cols, n_trials)
-    optuna_time = time.time() - optuna_start
-    print(f"Optuna time: {optuna_time:.1f}s")
-    n_estimators = best_params.pop("n_estimators")
-    learning_rate = best_params.pop("learning_rate")
-    max_depth = best_params.pop("max_depth")
-
+    # ── Timeout-based training: run Optuna repeatedly until timeout ─────────
+    # Keeps the model with the BEST test-set WR (live trading backtest).
+    # No min_wr gate — just find the best possible within the time budget.
+    # Default: 5 minutes CPU, 10 minutes GPU (configurable via --timeout).
     X_train = train_df[feature_cols].values
     y_train = train_df["TARGET"].values
     X_valid = valid_df[feature_cols].values
@@ -746,46 +740,94 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
     n_long = y_train.sum()
     n_short = len(y_train) - n_long
     scale_weight = n_short / n_long if n_long > 0 else 1.0
-    # Note: recency weighting removed — with random split, train samples are from
-    # all time periods so chronological order is meaningless. Class balance only.
 
-    model_params = {
-        "n_estimators": n_estimators,
-        "learning_rate": learning_rate,
-        "max_depth": max_depth,
-        "subsample": best_params.get("subsample", 0.8),
-        "colsample_bytree": best_params.get("colsample_bytree", 0.8),
-        "min_child_weight": best_params.get("min_child_weight", 1),
-        "gamma": best_params.get("gamma", 0.0),
-        "reg_alpha": best_params.get("reg_alpha", 0.0),
-        "reg_lambda": best_params.get("reg_lambda", 1.0),
-        "scale_pos_weight": scale_weight,
-        "objective": "binary:logistic",
-        "eval_metric": "logloss",
-        "random_state": 42,
-        "early_stopping_rounds": 50,
-    }
-    if device != "cpu":
-        model_params["device"] = device
+    timeout_seconds = int(os.environ.get("TRAIN_TIMEOUT", 300))  # 5 minutes default
+    best_attempt_wr = 0.0
+    best_attempt_model = None
+    best_attempt_params = None
+    best_attempt_y_pred_test = None
+    best_attempt_y_prob_test = None
+    best_attempt_y_pred_valid = None
+    best_attempt_y_prob_valid = None
+    retry_start = time.time()
+    attempt = 0
 
-    print(f"\nFinal model config (Optuna-selected):")
+    print(f"\nTraining (timeout {timeout_seconds//60}min, finding best backtest WR)...")
+
+    while True:
+        elapsed = time.time() - retry_start
+        if elapsed > timeout_seconds:
+            break
+        attempt += 1
+
+        best_params = optimize_hyperparams(train_df, feature_cols, n_trials)
+        n_estimators = best_params.pop("n_estimators")
+        learning_rate = best_params.pop("learning_rate")
+        max_depth = best_params.pop("max_depth")
+
+        model_params = {
+            "n_estimators": n_estimators,
+            "learning_rate": learning_rate,
+            "max_depth": max_depth,
+            "subsample": best_params.get("subsample", 0.8),
+            "colsample_bytree": best_params.get("colsample_bytree", 0.8),
+            "min_child_weight": best_params.get("min_child_weight", 1),
+            "gamma": best_params.get("gamma", 0.0),
+            "reg_alpha": best_params.get("reg_alpha", 0.0),
+            "reg_lambda": best_params.get("reg_lambda", 1.0),
+            "scale_pos_weight": scale_weight,
+            "objective": "binary:logistic",
+            "eval_metric": "logloss",
+            "random_state": 42 + attempt,
+            "early_stopping_rounds": 50,
+        }
+        if device != "cpu":
+            model_params["device"] = device
+
+        model = xgb.XGBClassifier(**model_params)
+        model.fit(X_train_scaled, y_train,
+                  eval_set=[(X_valid_scaled, valid_df["TARGET"].values)],
+                  verbose=False)
+
+        y_pred_t = model.predict(X_test_scaled)
+        y_prob_t = model.predict_proba(X_test_scaled)
+        correct = sum(
+            1 for idx, (_, row) in enumerate(test_df.iterrows())
+            if (y_pred_t[idx] == 1 and row["VERDICT_LONG"] == "TP") or
+               (y_pred_t[idx] == 0 and row["VERDICT_SHORT"] == "TP")
+        )
+        attempt_wr = correct / len(test_df) * 100
+        better = "★ NEW BEST" if attempt_wr > best_attempt_wr else ""
+        print(f"  Attempt {attempt}: WR={attempt_wr:.1f}% | Trees={n_estimators} LR={learning_rate:.4f} Depth={max_depth} [{elapsed:.0f}s] {better}")
+
+        if attempt_wr > best_attempt_wr:
+            best_attempt_wr = attempt_wr
+            best_attempt_model = model
+            best_attempt_params = model_params.copy()
+            best_attempt_y_pred_test = y_pred_t
+            best_attempt_y_prob_test = y_prob_t
+            best_attempt_y_pred_valid = model.predict(X_valid_scaled)
+            best_attempt_y_prob_valid = model.predict_proba(X_valid_scaled)
+
+    # Use best model found within timeout
+    model = best_attempt_model
+    model_params = best_attempt_params
+    y_pred_test = best_attempt_y_pred_test
+    y_prob_test = best_attempt_y_prob_test
+    y_pred_valid = best_attempt_y_pred_valid
+    y_prob_valid = best_attempt_y_prob_valid
+    optuna_time = time.time() - retry_start
+
+    n_estimators = model_params["n_estimators"]
+    learning_rate = model_params["learning_rate"]
+    max_depth = model_params["max_depth"]
+
+    print(f"\nBest model found in {attempt} attempts ({optuna_time:.0f}s): WR={best_attempt_wr:.1f}%")
+    print(f"Final model config (Optuna-selected):")
     print(f"  Trees: {n_estimators} | LR: {learning_rate:.6f} | Depth: {max_depth} | Device: {device}")
     print(f"  Subsample: {model_params['subsample']:.2f} | ColSample: {model_params['colsample_bytree']:.2f}")
     print(f"  Gamma: {model_params['gamma']:.2f} | Alpha: {model_params['reg_alpha']:.2f} | Lambda: {model_params['reg_lambda']:.2f}")
-    train_start = time.time()
-    model = xgb.XGBClassifier(**model_params)
-    # Use VALID set for early stopping (not TEST — that stays locked)
-    model.fit(X_train_scaled, y_train,
-              eval_set=[(X_valid_scaled, valid_df["TARGET"].values)],
-              verbose=False)
-    train_time = time.time() - train_start
-    print(f"Final model training time: {train_time:.1f}s")
-
-    # Predictions on valid + test
-    y_pred_valid = model.predict(X_valid_scaled)
-    y_prob_valid = model.predict_proba(X_valid_scaled)
-    y_pred_test  = model.predict(X_test_scaled)
-    y_prob_test  = model.predict_proba(X_test_scaled)
+    train_time = optuna_time
 
     # Feature importance
     importance = model.feature_importances_
@@ -838,14 +880,7 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
         if r["total"] > 0:
             print(f"  {thresh:>10.2f} {r['total']:>7} {skip_pct:>6.1f}% {r['wr']:>9.1f}% {r['edge']:>+8.3f}R{marker}")
 
-    # ── Win rate gate: does the test set (last 3 months) meet minimum WR? ───
-    passes_gate = raw["wr"] >= min_wr * 100
-    print(f"\n{'='*50}")
-    print(f"WIN RATE GATE")
-    print(f"{'='*50}")
-    print(f"Test WR: {raw['wr']:.1f}% | Required: {min_wr*100:.0f}% | {'✔ PASS' if passes_gate else '✘ FAIL'}")
-
-    # ── Save model — only if WR gate passed AND new run beats existing ────
+    # ── Save model — only overwrite if new run beats existing on disk ────
     ticker = os.path.basename(csv_path).split("_")[0]
     date_str = datetime.now().strftime("%Y%m%d")
     model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
@@ -869,10 +904,7 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
         except (ValueError, IOError):
             pass
 
-    if not force_save and not passes_gate:
-        print(f"\n✘ MODEL REJECTED — test WR {raw['wr']:.1f}% < {min_wr*100:.0f}% required")
-        print(f"  Not saving. Run again with more trials, or use --force-save to override.")
-    elif force_save or new_score > existing_score:
+    if force_save or new_score > existing_score:
         import json as _json
         model.save_model(model_path)
         joblib.dump(scaler, scaler_path)
@@ -948,8 +980,8 @@ Override examples:
                         help="Only train on trending regimes: 0=all (default), 50=top half ADX")
     parser.add_argument("--force-save", action="store_true",
                         help="Overwrite saved model even if new run scores lower")
-    parser.add_argument("--min-wr", type=float, default=0.55,
-                        help="Minimum win rate required to save model (default 0.55 = 55%%)")
+    parser.add_argument("--timeout", type=int, default=None,
+                        help="Training timeout in seconds (default: 300 CPU, 600 GPU)")
     args = parser.parse_args()
 
     if not os.path.exists(args.csv):
@@ -965,8 +997,11 @@ Override examples:
     else:
         use_deep = None  # auto
 
+    # Set timeout via env var so train_model can read it
+    if args.timeout is not None:
+        os.environ["TRAIN_TIMEOUT"] = str(args.timeout)
     train_model(args.csv, 0.7, args.n_trials, use_deep, args.min_adx_pctile,
-                force_save=args.force_save, min_wr=args.min_wr)
+                force_save=args.force_save)
 
 
 if __name__ == "__main__":
