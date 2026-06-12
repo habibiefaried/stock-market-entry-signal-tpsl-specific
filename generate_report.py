@@ -3,7 +3,6 @@ import numpy as np
 import json
 import xgboost as xgb
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score, precision_score
 import joblib
 import os
 import argparse
@@ -239,22 +238,18 @@ def generate_html(ticker, trades, mc_results, model_metrics, latest_prediction, 
     <!-- Model Metrics -->
     <div class="grid">
         <div class="card">
-            <h3>Model Metrics (Test Set)</h3>
+            <h3>Backtest Performance (Test Set)</h3>
             <div class="stat">
-                <div class="stat-label">Accuracy</div>
-                <div class="stat-value">{model_metrics['accuracy']:.1f}%</div>
+                <div class="stat-label">Win Rate (TP hit before SL)</div>
+                <div class="stat-value {'positive' if model_metrics['win_rate'] > 50 else 'negative'}">{model_metrics['win_rate']:.1f}%</div>
             </div>
             <div class="stat">
-                <div class="stat-label">Precision (LONG)</div>
-                <div class="stat-value">{model_metrics['precision_long']:.1f}%</div>
+                <div class="stat-label">Expected Edge per Trade</div>
+                <div class="stat-value {'positive' if model_metrics['edge'] > 0 else 'negative'}">{model_metrics['edge']:+.3f}R</div>
             </div>
             <div class="stat">
-                <div class="stat-label">Precision (SHORT)</div>
-                <div class="stat-value">{model_metrics['precision_short']:.1f}%</div>
-            </div>
-            <div class="stat">
-                <div class="stat-label">Expected Edge (@ conf≥{model_metrics['threshold']*100:.0f}%)</div>
-                <div class="stat-value {'positive' if model_metrics['edge'] > 0 else 'negative'}">{model_metrics['edge']:+.3f}R/trade</div>
+                <div class="stat-label">Confidence Threshold</div>
+                <div class="stat-value">{model_metrics['threshold']*100:.0f}%</div>
             </div>
             <h3 style="margin-top:16px;">Optuna Model Config</h3>
             <div class="stat">
@@ -475,15 +470,8 @@ def main():
 
     y_pred = model.predict(X_test_scaled)
     y_prob = model.predict_proba(X_test_scaled)
-    accuracy = accuracy_score(y_test, y_pred) * 100
-    prec_long = precision_score(y_test, y_pred, pos_label=1, zero_division=0) * 100
-    prec_short = precision_score(y_test, y_pred, pos_label=0, zero_division=0) * 100
 
-    accuracy = accuracy_score(y_test, y_pred) * 100
-    prec_long = precision_score(y_test, y_pred, pos_label=1, zero_division=0) * 100
-    prec_short = precision_score(y_test, y_pred, pos_label=0, zero_division=0) * 100
-
-    # Run trader-style backtest at optimised threshold
+    # Win rate = the only metric that matters: did TP hit before SL?
     print(f"Running backtest (confidence threshold: {best_threshold:.2f})...")
     bt = _backtest_at_threshold(test_df, y_pred, y_prob, best_threshold)
     win_rate = bt["wr"] / 100
@@ -525,9 +513,7 @@ def main():
             params = _json.load(f)
 
     model_metrics = {
-        "accuracy": accuracy,
-        "precision_long": prec_long,
-        "precision_short": prec_short,
+        "win_rate": bt["wr"],
         "edge": edge,
         "threshold": best_threshold,
         "train_samples": len(train_df),

@@ -151,6 +151,22 @@ Running multiple attempts within a timeout guarantees you find a good
 model without manual re-running. For ranking.py with 20 stocks at 5min
 each = 1.5 hours total (reasonable).
 
+**PRIMARY OBJECTIVE: WIN RATE (TP hit before SL)**
+
+Every part of the pipeline optimises for one thing — "does price hit TP before SL?"
+
+| Stage | What it optimises | NOT optimising |
+|-------|-------------------|----------------|
+| Optuna walk-forward CV | Actual TP-hit win rate | Accuracy, logloss |
+| Timeout retry loop | Highest test-set WR across attempts | Number of trials |
+| Model save logic | Edge (derived from WR) vs existing model | Training loss |
+| HTML report | Win Rate + Edge displayed | Accuracy/precision removed |
+| current.py | TRADE if conf > threshold that maximised WR | - |
+
+Accuracy (did model match TARGET label?) is misleading because a "wrong"
+prediction can still hit TP (both directions sometimes win). Win Rate
+directly measures: "if you follow this signal, do you make money?"
+
 **Minimum WR requirement:**
 - Default: **55% WR** (configurable via `--min-wr 0.55`)
 - At 1.5:1 R:R, 55% WR = +0.475R edge — meaningfully profitable
