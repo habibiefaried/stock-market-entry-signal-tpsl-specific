@@ -292,13 +292,13 @@ def generate_html(ticker, trades, mc_results, model_metrics, latest_prediction, 
         </div>
 
         <div class="card">
-            <h3>Recent Trades</h3>
+            <h3>All Test Trades</h3>
             <div class="trades-scroll">
             <table>
                 <thead><tr><th>Date</th><th>Dir</th><th>Result</th><th>Days</th><th>Conf</th><th>Cum R</th></tr></thead>
                 <tbody>
 """
-    for t in trades[-30:]:
+    for t in trades:
         badge = 'badge-green' if t['hit_tp'] else 'badge-red'
         result = 'TP' if t['hit_tp'] else 'SL'
         html += f"""                    <tr><td>{t['date'][:10]}</td><td>{t['direction']}</td><td><span class="badge {badge}">{result}</span></td><td>{t['days']}d</td><td>{t['confidence']*100:.0f}%</td><td>{t['cumulative_r']:+.1f}R</td></tr>\n"""
