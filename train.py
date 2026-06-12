@@ -28,8 +28,9 @@ warnings.filterwarnings("ignore")
 try:
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
+    from optuna_integration import XGBoostPruningCallback
 except ImportError:
-    raise ImportError("optuna is required. Run: pip install optuna")
+    raise ImportError("optuna and optuna-integration are required. Run: pip install optuna optuna-integration")
 
 
 # ──────────────────────────────────────────────
@@ -301,11 +302,12 @@ def generate_deep_features(df, feature_cols, seq_len=15, epochs=20, lr=0.001):
 # ──────────────────────────────────────────────
 
 def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1, trial=None):
-    """Walk-forward CV — reports intermediate fold scores for MedianPruner."""
+    """Walk-forward CV with XGBoostPruningCallback for per-tree pruning."""
     n = len(df)
     test_len = int(n * test_size)
     min_train = int(n * 0.4)
     scores = []
+    max_boost_rounds = params.get("n_estimators", 30000)
 
     for i in range(n_splits):
         test_end = n - i * test_len
@@ -328,6 +330,7 @@ def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1, trial=N
         n_short = len(y_train) - n_long
         sw = n_short / n_long if n_long > 0 else 1.0
 
+        callbacks = [XGBoostPruningCallback(trial, "validation_0-logloss")] if trial else None
         model = xgb.XGBClassifier(
             **params,
             scale_pos_weight=sw,
@@ -335,6 +338,7 @@ def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1, trial=N
             eval_metric="logloss",
             random_state=42,
             early_stopping_rounds=30,
+            callbacks=callbacks,
         )
         model.fit(X_train_s, y_train, eval_set=[(X_test_s, test_df["TARGET"].values)],
                   verbose=False)
