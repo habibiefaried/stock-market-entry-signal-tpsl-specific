@@ -88,32 +88,41 @@ Given today's market conditions, should I enter LONG or SHORT to maximize my cha
   - SHORT: did price go DOWN to hit -1.5×ATR before going UP to hit +1×ATR?
 - Outputs clean CSV with zero NaN values
 
-### Data Split Strategy — Purged Random Monthly Blocks (70/15/15)
+### Data Split Strategy — Random Train + Forced Recent Test
 
 ```
-Full 9 years → group by month → randomly assign months to sets:
-├── 70% of months → TRAIN  (Optuna walk-forward CV runs here)
-├── 15% of months → VALID  (confidence threshold tuned here)
-└── 15% of months → TEST   (final honest backtest — untouched until end)
-    ±5 day embargo at block boundaries prevents temporal leakage.
+Full 9 years → group by month:
+├── Last 3 months → FORCED into TEST  (always recent — "does model work NOW?")
+├── Remaining months → randomly assign:
+│   ├── ~85% → TRAIN  (diverse months from ALL years/regimes)
+│   └── ~15% → VALID  (random months, for threshold tuning)
+└── ±5 day embargo at block boundaries prevents temporal leakage
 ```
 
-**WHY RANDOM INSTEAD OF CHRONOLOGICAL:**
-XGBoost treats each row independently — it doesn't care about order. Each row already has temporal context via lag features (Return_Lag_1, MACD_Hist_Lag_5, etc). A chronological split asks "do 2018 patterns predict 2026?" (often no, different regime). Random monthly blocks ensure ALL sets contain samples from ALL market regimes — bull, bear, crash, recovery.
+**WHY FORCED RECENT TEST:**
+If test months are randomly scattered, 2026 data might end up in training — you'd never see how the model performs on today's market. Forcing the last 3 months into test guarantees the backtest directly answers: "if I trade this model starting today, what happens?"
 
-**WHY MONTHLY BLOCKS (not individual random scatter):**
-- Individual scatter + 10-day embargo destroys 67% of data (too many neighbors purged)
-- Monthly blocks keep adjacent days together — embargo only needed at month boundaries
-- Each month has ~21 trading days — enough to learn patterns, not so large as to waste data
-- Result: only ~12% data loss from embargo (vs 67% with individual scatter)
+**WHY RANDOM TRAIN/VALID (not chronological):**
+XGBoost treats each row independently — it doesn't care about order. Each row already has temporal context via lag features (Return_Lag_1, MACD_Hist_Lag_5, etc). A chronological split asks "do 2018 patterns predict 2026?" (often no). Random assignment ensures training sees ALL regimes (bull, bear, crash, recovery).
 
-**WHY THE 5-DAY EMBARGO:**
-- Monday in training + Tuesday in test = they share overlapping TP/SL label windows
-- Also their features (RSI, MACD etc) are nearly identical (autocorrelated)
-- ±5 day buffer at month boundaries removes this leakage
-- Based on "Combinatorial Purged Cross-Validation" from Marcos Lopez de Prado's "Advances in Financial Machine Learning"
+**WHY MONTHLY BLOCKS:**
+- Individual sample scatter + embargo destroys 67% of data
+- Monthly blocks keep adjacent days together — embargo only at boundaries
+- Only ~9% data loss from embargo
 
-**Result: train/valid/test all contain samples from 2018 AND 2021 AND 2024** etc. The model must prove it works in ALL regimes, not just one period.
+**WHY ±5 DAY EMBARGO:**
+- Adjacent samples share overlapping TP/SL label windows (both look forward 10 days)
+- Their features are nearly identical (autocorrelated RSI, MACD etc)
+- Buffer at month boundaries removes this leakage
+- Based on Marcos Lopez de Prado's "Advances in Financial Machine Learning"
+
+**AAPL result (50 trials):**
+```
+Train: 1095 (random months from all years)
+Valid: 188 (random months)
+Test:  38 (Apr–Jun 2026, most recent)
+WR on test: 68.4% | Edge: +0.711R | 3/3 triannual blocks passed 55%
+```
 
 **Triannual walk-forward validation gate:**
 

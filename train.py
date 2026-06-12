@@ -459,76 +459,80 @@ def _find_best_threshold_optuna(df_valid, y_pred_valid, y_prob_valid, n_trials=4
     return round(study.best_params["threshold"], 2), study.best_value
 
 
-def purged_random_split(df, train_frac=0.70, valid_frac=0.15, test_frac=0.15,
+def purged_random_split(df, valid_frac=0.15, n_test_months=3,
                         embargo_days=5, random_state=42):
     """
-    Purged random train/valid/test split using MONTHLY BLOCKS.
+    Purged random split with FORCED RECENT TEST set.
 
-    Instead of scattering individual samples (which causes massive embargo
-    overlap), we randomly assign entire MONTHS to train/valid/test.
-    This ensures:
-    - All sets contain samples from multiple years and market regimes
-    - No temporal leakage: entire month blocks go to one set
-    - Minimal data loss from embargo: only ±5 days at month boundaries
+    Strategy:
+      - TEST: ALWAYS the most recent N months (default 3). This guarantees
+        you can see how the model performs on the latest market conditions.
+      - VALID: random 15% of remaining months (for threshold tuning)
+      - TRAIN: everything else (diverse months from all years/regimes)
+      - ±5 day embargo at block boundaries prevents temporal leakage
 
-    WHY MONTHLY BLOCKS:
-    - Individual random scatter + 10-day embargo destroys 67% of data
-    - Monthly blocks keep adjacent days together (no embargo needed within block)
-    - Only block BOUNDARIES need the embargo buffer (much less waste)
-    - Still achieves regime diversity: test set gets some months from 2019,
-      some from 2022, some from 2025 — all market conditions represented
+    WHY FORCED RECENT TEST:
+    If test months are randomly scattered, you might never test on 2026 data.
+    For live trading you NEED to know the model works NOW. Forcing the last
+    3 months into test guarantees this — if it fails on recent data, you know
+    not to trade it regardless of historical performance.
 
-    Based on concepts from Marcos Lopez de Prado's CPCV, adapted for
-    practical dataset sizes (~1400 samples).
+    WHY RANDOM TRAIN/VALID:
+    XGBoost doesn't care about data order — each row is independent with all
+    temporal context encoded in lag features. Random assignment ensures training
+    sees ALL regimes (bull, bear, crash, recovery) and isn't biased toward
+    only old data. Validation also covers diverse conditions for threshold tuning.
 
-    Returns: (train_df, valid_df, test_df) — each is a copy, reset_index.
+    Returns: (train_df, valid_df, test_df) — each reset_index'd.
     """
     rng = np.random.default_rng(random_state)
     dates = pd.to_datetime(df["Date"])
 
-    # Group indices by year-month (fast: no apply, use dict)
+    # Group indices by year-month
     yearmonth = dates.dt.to_period("M")
     month_dict = {}
     for i, ym in enumerate(yearmonth):
         month_dict.setdefault(ym, []).append(i)
     months = sorted(month_dict.keys())
-    month_groups = month_dict
-
-    # Randomly assign months to train/valid/test
     n_months = len(months)
-    n_test_months  = max(1, int(n_months * test_frac))
-    n_valid_months = max(1, int(n_months * valid_frac))
 
-    shuffled_months = rng.permutation(n_months)
-    test_month_idx  = set(shuffled_months[:n_test_months])
-    valid_month_idx = set(shuffled_months[n_test_months:n_test_months + n_valid_months])
-    train_month_idx = set(range(n_months)) - test_month_idx - valid_month_idx
+    # TEST: always the most recent N months (forced)
+    test_months = months[-n_test_months:]
+    remaining_months = months[:-n_test_months]
 
-    # Collect row indices for each set
+    # VALID: random selection from remaining months
+    n_valid_months = max(1, int(len(remaining_months) * valid_frac / (1 - n_test_months / n_months)))
+    shuffled = rng.permutation(len(remaining_months))
+    valid_month_idx = set(shuffled[:n_valid_months])
+    train_month_idx = set(range(len(remaining_months))) - valid_month_idx
+
+    # Collect row indices
     train_indices, valid_indices, test_indices = [], [], []
-    for i, month in enumerate(months):
-        rows = month_groups[month]
-        if i in train_month_idx:
-            train_indices.extend(rows)
-        elif i in valid_month_idx:
+    for i, month in enumerate(remaining_months):
+        rows = month_dict[month]
+        if i in valid_month_idx:
             valid_indices.extend(rows)
         else:
-            test_indices.extend(rows)
+            train_indices.extend(rows)
+    for month in test_months:
+        test_indices.extend(month_dict[month])
 
-    # Apply embargo: remove first/last embargo_days of each valid/test block
-    # from training (prevents leakage at month boundaries)
+    # Embargo: remove ±5 days around valid/test boundaries from training
     embargo_set = set()
     for idx_list in [valid_indices, test_indices]:
-        if not idx_list:
-            continue
         sorted_idx = sorted(idx_list)
-        # First and last sample of this set's contiguous runs
-        for i in range(len(sorted_idx)):
+        if not sorted_idx:
+            continue
+        # Only embargo the FIRST and LAST indices of contiguous runs
+        boundaries = [sorted_idx[0], sorted_idx[-1]]
+        for i in range(1, len(sorted_idx)):
+            if sorted_idx[i] - sorted_idx[i-1] > 1:
+                boundaries.extend([sorted_idx[i-1], sorted_idx[i]])
+        for b in boundaries:
             for offset in range(1, embargo_days + 1):
-                embargo_set.add(sorted_idx[i] - offset)
-                embargo_set.add(sorted_idx[i] + offset)
+                embargo_set.add(b - offset)
+                embargo_set.add(b + offset)
 
-    # Only remove embargo samples that were in training
     train_indices = sorted([i for i in train_indices if i not in embargo_set])
     valid_indices = sorted(valid_indices)
     test_indices  = sorted(test_indices)
@@ -676,17 +680,18 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
             df = df[df[regime_col] >= min_adx_pctile].reset_index(drop=True)
             print(f"ADX regime filter (>= {min_adx_pctile:.0f}th pctile): {before} → {len(df)} samples")
 
-    # ── Purged random 70/15/15 split ────────────────────────────────────────
-    # Random split ensures train/valid/test all contain samples from ALL market
-    # regimes (bull, bear, crash, recovery). 10-day embargo prevents temporal
-    # leakage between adjacent samples that share overlapping label windows.
+    # ── Purged random split: recent 3 months forced to TEST ─────────────────
+    # Training sees diverse months from all years (random) for regime coverage.
+    # Test is ALWAYS the most recent 3 months — answers "does model work NOW?"
     n = len(df)
-    train_df, valid_df, test_df = purged_random_split(
-        df, train_frac=0.70, valid_frac=0.15, test_frac=0.15, embargo_days=5)
-    print(f"\nSplit (purged random 70/15/15, embargo=10 days):")
-    print(f"  Train: {len(train_df)} | Valid: {len(valid_df)} | Test: {len(test_df)}")
+    train_df, valid_df, test_df = purged_random_split(df, valid_frac=0.15, n_test_months=3)
     n_embargo = n - len(train_df) - len(valid_df) - len(test_df)
-    print(f"  Embargo purged: {n_embargo} samples ({n_embargo/n*100:.1f}% — ±5 day buffer around test/valid)")
+    test_dates = pd.to_datetime(test_df["Date"])
+    print(f"\nSplit (random train/valid + forced recent test, embargo ±5 days):")
+    print(f"  Train: {len(train_df)} (random months from all years)")
+    print(f"  Valid: {len(valid_df)} (random months, for threshold tuning)")
+    print(f"  Test:  {len(test_df)} (last 3 months: {test_dates.min().strftime('%Y-%m-%d')} → {test_dates.max().strftime('%Y-%m-%d')})")
+    print(f"  Embargo: {n_embargo} samples purged ({n_embargo/n*100:.1f}%)")
 
     # Optuna only sees the TRAIN slice (80%)
     optuna_start = time.time()

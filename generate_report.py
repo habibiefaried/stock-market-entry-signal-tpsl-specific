@@ -448,8 +448,7 @@ def main():
     df, _ = load_and_prepare(args.csv)
     n = len(df)
     # Purged random split — must match train.py exactly (same random_state=42)
-    train_df, _, test_df = purged_random_split(
-        df, train_frac=0.70, valid_frac=0.15, test_frac=0.15, embargo_days=5)
+    train_df, _, test_df = purged_random_split(df, valid_frac=0.15, n_test_months=3)
     print(f"Test set: {len(test_df)} samples ({test_df.iloc[0]['Date'][:10]} → {test_df.iloc[-1]['Date'][:10]})")
 
     X_test = test_df[feature_cols].values
