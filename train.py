@@ -28,9 +28,8 @@ warnings.filterwarnings("ignore")
 try:
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    from optuna_integration import XGBoostPruningCallback
 except ImportError:
-    raise ImportError("optuna and optuna-integration are required. Run: pip install optuna 'optuna-integration[xgboost]'")
+    raise ImportError("optuna is required. Run: pip install optuna")
 
 
 # ──────────────────────────────────────────────
@@ -362,9 +361,9 @@ def optimize_hyperparams(df, feature_cols, n_trials=100):
 
     def objective(trial):
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 500, 5000),
-            "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
-            "max_depth": trial.suggest_int("max_depth", 3, 10),
+            "n_estimators": trial.suggest_int("n_estimators", 2000, 30000),
+            "learning_rate": trial.suggest_float("learning_rate", 0.0001, 0.5, log=True),
+            "max_depth": trial.suggest_int("max_depth", 3, 8),
             "subsample": trial.suggest_float("subsample", 0.6, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
             "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
