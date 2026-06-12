@@ -359,9 +359,14 @@ def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1, trial=N
     return np.mean(scores) if scores else 0.0
 
 
-def optimize_hyperparams(df, feature_cols, n_trials=100):
-    """Optuna Bayesian optimization with MedianPruner (fold-level pruning only)."""
-    print(f"Running Optuna optimization ({n_trials} trials)...")
+def optimize_hyperparams(df, feature_cols, n_trials=100, n_jobs=1):
+    """Optuna Bayesian optimization with GPU parallelism + MedianPruner.
+
+    n_jobs: number of parallel trials. 2-4 works well on laptop GPU
+            (XGBoost CUDA can handle concurrent models before VRAM fills).
+    """
+    plural = "s" if n_jobs > 1 else ""
+    print(f"Running Optuna optimization ({n_trials} trials, {n_jobs} parallel worker{plural})...")
 
     def objective(trial):
         params = {
@@ -377,15 +382,18 @@ def optimize_hyperparams(df, feature_cols, n_trials=100):
         }
         return walk_forward_cv(df, feature_cols, params, n_splits=5, trial=trial)
 
-    study = optuna.create_study(
-        direction="maximize",
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=2),
-    )
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+    kwargs = dict(direction="maximize",
+                  pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=2))
+    if n_jobs > 1:
+        kwargs["storage"] = "sqlite:///:memory:"
+
+    study = optuna.create_study(**kwargs)
+    study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs, show_progress_bar=(n_jobs == 1))
 
     print(f"\nBest walk-forward win rate: {study.best_value*100:.1f}%")
     print(f"Best params: {study.best_params}")
-    print(f"Pruned trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])}/{n_trials}")
+    pruned = len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])
+    print(f"Pruned trials: {pruned}/{n_trials}")
     return study.best_params
 
 
@@ -637,7 +645,7 @@ def triannual_walk_forward_test(df, feature_cols, model, scaler, min_wr=0.55, ye
 
 def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
                 use_deep: bool = None, min_adx_pctile: float = 0.0,
-                force_save: bool = False):
+                force_save: bool = False, n_jobs: int = 1):
     """
     Train XGBoost classifier: predict LONG(1) vs SHORT(0).
 
@@ -756,7 +764,7 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
             break
         attempt += 1
 
-        best_params = optimize_hyperparams(train_df, feature_cols, n_trials)
+        best_params = optimize_hyperparams(train_df, feature_cols, n_trials, n_jobs=n_jobs)
         n_estimators = best_params.pop("n_estimators")
         learning_rate = best_params.pop("learning_rate")
         max_depth = best_params.pop("max_depth")
@@ -978,6 +986,8 @@ Override examples:
                         help="Overwrite saved model even if new run scores lower")
     parser.add_argument("--timeout", type=int, default=None,
                         help="Training timeout in seconds (default: 300 CPU, 600 GPU)")
+    parser.add_argument("--n-jobs", type=int, default=2,
+                        help="Parallel Optuna trials (default: 2, set to 1 for sequential)")
     args = parser.parse_args()
 
     if not os.path.exists(args.csv):
@@ -997,7 +1007,7 @@ Override examples:
     if args.timeout is not None:
         os.environ["TRAIN_TIMEOUT"] = str(args.timeout)
     train_model(args.csv, 0.7, args.n_trials, use_deep, args.min_adx_pctile,
-                force_save=args.force_save)
+                force_save=args.force_save, n_jobs=args.n_jobs)
 
 
 if __name__ == "__main__":
