@@ -23,7 +23,7 @@ import warnings
 import time
 from datetime import datetime
 
-warnings.filterwarnings("ignore", message=".*mismatched devices.*")
+warnings.filterwarnings("ignore")
 
 try:
     import optuna

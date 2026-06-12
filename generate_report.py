@@ -11,9 +11,7 @@ from datetime import datetime
 from train import (load_and_prepare, detect_gpu,
                    generate_deep_features, _backtest_at_threshold)
 
-# Suppress XGBoost device-mismatch warning (numpy arrays on CPU auto-converted
-# to CUDA DMatrix — harmless performance hint, not a correctness issue)
-warnings.filterwarnings("ignore", message=".*mismatched devices.*")
+warnings.filterwarnings("ignore")
 
 
 def backtest(df, y_pred, y_prob, threshold=0.0):

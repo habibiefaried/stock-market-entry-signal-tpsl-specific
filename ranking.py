@@ -15,7 +15,10 @@ import os
 import sys
 import argparse
 import subprocess
+import warnings
 from datetime import datetime
+
+warnings.filterwarnings("ignore")
 
 
 def main():

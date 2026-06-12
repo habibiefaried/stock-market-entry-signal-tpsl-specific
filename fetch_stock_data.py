@@ -1,7 +1,7 @@
 import warnings
 import yfinance as yf
 import pandas as pd
-warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
+warnings.filterwarnings("ignore")
 import numpy as np
 from datetime import datetime, timedelta
 import os
