@@ -256,6 +256,19 @@ def generate_html(ticker, trades, mc_results, model_metrics, latest_prediction, 
                 <div class="stat-label">Expected Edge (@ conf≥{model_metrics['threshold']*100:.0f}%)</div>
                 <div class="stat-value {'positive' if model_metrics['edge'] > 0 else 'negative'}">{model_metrics['edge']:+.3f}R/trade</div>
             </div>
+            <h3 style="margin-top:16px;">Optuna Model Config</h3>
+            <div class="stat">
+                <div class="stat-label">Trees / Learning Rate / Depth</div>
+                <div class="stat-value" style="font-size:1.1rem">{model_metrics['n_estimators']} / {model_metrics['learning_rate']:.5f} / {model_metrics['max_depth']}</div>
+            </div>
+            <div class="stat">
+                <div class="stat-label">Subsample / ColSample</div>
+                <div class="stat-value" style="font-size:1.1rem">{model_metrics['subsample']:.3f} / {model_metrics['colsample_bytree']:.3f}</div>
+            </div>
+            <div class="stat">
+                <div class="stat-label">Gamma / Alpha / Lambda</div>
+                <div class="stat-value" style="font-size:1.1rem">{model_metrics['gamma']:.3f} / {model_metrics['reg_alpha']:.3f} / {model_metrics['reg_lambda']:.3f}</div>
+            </div>
         </div>
 
         <div class="card" style="grid-column: span 2;">
@@ -503,6 +516,8 @@ def main():
         "tradeable": tradeable,
     }
 
+    # Extract model config from saved model
+    params = model.get_params() or {}
     model_metrics = {
         "accuracy": accuracy,
         "precision_long": prec_long,
@@ -512,6 +527,14 @@ def main():
         "train_samples": len(train_df),
         "test_samples": len(test_df),
         "n_features": len(feature_cols),
+        "n_estimators": params.get("n_estimators") or 0,
+        "learning_rate": params.get("learning_rate") or 0,
+        "max_depth": params.get("max_depth") or 0,
+        "subsample": params.get("subsample") or 0,
+        "colsample_bytree": params.get("colsample_bytree") or 0,
+        "gamma": params.get("gamma") or 0,
+        "reg_alpha": params.get("reg_alpha") or 0,
+        "reg_lambda": params.get("reg_lambda") or 0,
     }
 
     # Generate HTML
