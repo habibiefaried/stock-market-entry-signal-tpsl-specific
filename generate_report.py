@@ -387,7 +387,6 @@ new Chart(mcCtx, {{
 def main():
     parser = argparse.ArgumentParser(description="Generate HTML report with backtest and Monte Carlo")
     parser.add_argument("--csv", type=str, required=True, help="Path to CSV from fetch_stock_data.py")
-    parser.add_argument("--train-ratio", type=float, default=0.9, help="Train/test split ratio")
     parser.add_argument("--n-trials", type=int, default=100, help="Number of Optuna trials")
     parser.add_argument("--mc-simulations", type=int, default=10000, help="Monte Carlo simulations")
     parser.add_argument("--mc-trades", type=int, default=252, help="Trades per MC simulation")

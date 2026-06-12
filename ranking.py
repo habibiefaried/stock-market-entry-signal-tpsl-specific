@@ -112,6 +112,7 @@ def main():
         prediction = None
         close_price = None
         optuna_wr = None
+        threshold = None
 
         for line in output.split("\n"):
             if "Win Rate:" in line and "Confidence" not in line:
@@ -126,9 +127,9 @@ def main():
                     pass
             if "Prediction:" in line:
                 prediction = line.split("Prediction:")[1].strip()
-            if "Confidence:" in line:
+            if "Confidence:" in line and "%" in line:
                 try:
-                    confidence = float(line.split("Confidence:")[1].strip().replace("%", ""))
+                    confidence = float(line.split("Confidence:")[1].strip().replace("%", "").split()[0])
                 except (ValueError, IndexError):
                     pass
             if "Close:" in line and close_price is None:
@@ -141,11 +142,23 @@ def main():
                     optuna_wr = float(line.split(":")[1].strip().replace("%", ""))
                 except (ValueError, IndexError):
                     pass
+            if "Threshold saved to:" in line and "(value:" in line:
+                try:
+                    threshold = float(line.split("(value:")[1].replace(")", "").strip())
+                except (ValueError, IndexError):
+                    pass
+
+        # Determine if signal clears the threshold
+        tradeable = confidence is not None and threshold is not None and (confidence >= threshold * 100)
+        trade_signal = "✔ TRADE" if tradeable else ("✘ SKIP" if threshold is not None else "?")
 
         result = {
             "ticker": ticker,
             "prediction": prediction or "N/A",
             "confidence": confidence or 0,
+            "threshold": threshold or 0.50,
+            "tradeable": tradeable,
+            "trade_signal": trade_signal,
             "win_rate": win_rate or 0,
             "edge": edge or 0,
             "optuna_wr": optuna_wr or 0,
@@ -153,22 +166,25 @@ def main():
             "error": None,
         }
         results.append(result)
-        print(f"  Result: {prediction} | Conf: {confidence:.1f}% | WR: {win_rate:.1f}% | Edge: {edge:+.3f}R")
+        print(f"  Result: {prediction} | Conf: {confidence:.1f}% vs thresh {threshold:.2f} → {trade_signal} | WR: {win_rate:.1f}% | Edge: {edge:+.3f}R")
 
-    # Rank by composite score: confidence * win_rate (both matter)
     valid_results = [r for r in results if r.get("error") is None]
-    valid_results.sort(key=lambda r: r["confidence"] * r["win_rate"], reverse=True)
     failed_results = [r for r in results if r.get("error") is not None]
 
+    # Sort: tradeable first (by edge), then non-tradeable (by edge)
+    valid_results.sort(key=lambda r: (r["tradeable"], r["edge"]), reverse=True)
+
     # Generate report
-    print(f"\n\n{'='*70}")
+    print(f"\n\n{'='*80}")
     print(f"  FINAL RANKING")
-    print(f"{'='*70}")
-    print(f"  {'Rank':<5} {'Ticker':<7} {'Direction':<10} {'Confidence':<12} {'Win Rate':<10} {'Edge':<10} {'Close':<10}")
-    print(f"  {'─'*5} {'─'*7} {'─'*10} {'─'*12} {'─'*10} {'─'*10} {'─'*10}")
+    print(f"{'='*80}")
+    print(f"  {'Rank':<5} {'Ticker':<7} {'Signal':<10} {'Direction':<8} {'Conf':<8} {'Thresh':<8} {'WR':<8} {'Edge':<9} {'Close'}")
+    print(f"  {'─'*5} {'─'*7} {'─'*10} {'─'*8} {'─'*8} {'─'*8} {'─'*8} {'─'*9} {'─'*8}")
 
     for rank, r in enumerate(valid_results, 1):
-        print(f"  {rank:<5} {r['ticker']:<7} {r['prediction']:<10} {r['confidence']:.1f}%{'':<7} {r['win_rate']:.1f}%{'':<5} {r['edge']:+.3f}R{'':<4} ${r['close']:.2f}")
+        print(f"  {rank:<5} {r['ticker']:<7} {r['trade_signal']:<10} {r['prediction']:<8} "
+              f"{r['confidence']:.1f}%{'':<3} {r['threshold']*100:.0f}%{'':<4} "
+              f"{r['win_rate']:.1f}%{'':<3} {r['edge']:+.3f}R{'':<3} ${r['close']:.2f}")
 
     if failed_results:
         print(f"\n  FAILED:")
@@ -180,18 +196,20 @@ def main():
     with open(output_path, "w") as f:
         f.write(f"STOCK RANKING REPORT — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
         f.write(f"Model: {model_label} | Trials: {args.n_trials} | Lookahead: {args.lookahead}d | ADX filter: {args.min_adx_pctile if args.min_adx_pctile > 0 else 'off'}\n")
-        f.write(f"{'='*70}\n\n")
-        f.write(f"{'Rank':<5} {'Ticker':<7} {'Direction':<10} {'Confidence':<12} {'Win Rate':<10} {'Edge':<10} {'Close':<10}\n")
-        f.write(f"{'─'*5} {'─'*7} {'─'*10} {'─'*12} {'─'*10} {'─'*10} {'─'*10}\n")
+        f.write(f"{'='*80}\n\n")
+        f.write(f"{'Rank':<5} {'Ticker':<7} {'Signal':<10} {'Direction':<8} {'Conf':<8} {'Thresh':<8} {'WR':<8} {'Edge':<9} {'Close'}\n")
+        f.write(f"{'─'*5} {'─'*7} {'─'*10} {'─'*8} {'─'*8} {'─'*8} {'─'*8} {'─'*9} {'─'*8}\n")
         for rank, r in enumerate(valid_results, 1):
-            f.write(f"{rank:<5} {r['ticker']:<7} {r['prediction']:<10} {r['confidence']:.1f}%{'':<7} {r['win_rate']:.1f}%{'':<5} {r['edge']:+.3f}R{'':<4} ${r['close']:.2f}\n")
+            f.write(f"{rank:<5} {r['ticker']:<7} {r['trade_signal']:<10} {r['prediction']:<8} "
+                    f"{r['confidence']:.1f}%{'':<3} {r['threshold']*100:.0f}%{'':<4} "
+                    f"{r['win_rate']:.1f}%{'':<3} {r['edge']:+.3f}R{'':<3} ${r['close']:.2f}\n")
         if failed_results:
             f.write(f"\nFAILED:\n")
             for r in failed_results:
                 f.write(f"  {r['ticker']}: {r['error']}\n")
-        f.write(f"\n{'='*70}\n")
-        f.write(f"Ranking sorted by: Confidence × Win Rate (composite score)\n")
-        f.write(f"Only trade top-ranked stocks with confidence >= 55%\n")
+        f.write(f"\n{'='*80}\n")
+        f.write(f"Sorted: tradeable (✔) first by edge, then non-tradeable (✘) by edge\n")
+        f.write(f"Only enter positions marked ✔ TRADE\n")
 
     print(f"\n  Report saved to: {output_path}")
     print(f"  Models saved to: models/{'{TICKER}'}_{date_str}_xgboost_*")
