@@ -10,7 +10,7 @@ import argparse
 import warnings
 from datetime import datetime
 from train import (load_and_prepare, detect_gpu,
-                   generate_deep_features, _backtest_at_threshold)
+                   generate_deep_features, _backtest_at_threshold, purged_random_split)
 
 # Suppress XGBoost device-mismatch warning (numpy arrays on CPU auto-converted
 # to CUDA DMatrix — harmless performance hint, not a correctness issue)
@@ -447,9 +447,9 @@ def main():
     # Load + prepare data for test set evaluation and report
     df, _ = load_and_prepare(args.csv)
     n = len(df)
-    # 70/15/15 split — must match train.py exactly
-    train_df = df[:int(n * 0.70)]
-    test_df  = df[int(n * 0.85):].reset_index(drop=True)
+    # Purged random split — must match train.py exactly (same random_state=42)
+    train_df, _, test_df = purged_random_split(
+        df, train_frac=0.70, valid_frac=0.15, test_frac=0.15, embargo_days=5)
     print(f"Test set: {len(test_df)} samples ({test_df.iloc[0]['Date'][:10]} → {test_df.iloc[-1]['Date'][:10]})")
 
     X_test = test_df[feature_cols].values

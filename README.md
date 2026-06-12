@@ -88,18 +88,32 @@ Given today's market conditions, should I enter LONG or SHORT to maximize my cha
   - SHORT: did price go DOWN to hit -1.5×ATR before going UP to hit +1×ATR?
 - Outputs clean CSV with zero NaN values
 
-### Data Split Strategy — 70/15/15 with Annual Walk-Forward Gate
+### Data Split Strategy — Purged Random Monthly Blocks (70/15/15)
 
 ```
-Full dataset (chronological, e.g. 9 years)
-├── 70% TRAIN  → Optuna walk-forward CV runs entirely here
-├── 15% VALID  → Confidence threshold tuned here (larger = less threshold overfit)
-└── 15% TEST   → Honest backtest — untouched until the very end
+Full 9 years → group by month → randomly assign months to sets:
+├── 70% of months → TRAIN  (Optuna walk-forward CV runs here)
+├── 15% of months → VALID  (confidence threshold tuned here)
+└── 15% of months → TEST   (final honest backtest — untouched until end)
+    ±5 day embargo at block boundaries prevents temporal leakage.
 ```
 
-**Why 70/15/15 instead of 80/10/10:**
-- Larger valid set (15% vs 10%) → threshold Optuna has more data → less chance of picking 0.69 vs 0.70 by noise
-- Larger test set (15% vs 10%) → ~217 samples instead of 145 → WR estimate is more statistically reliable
+**WHY RANDOM INSTEAD OF CHRONOLOGICAL:**
+XGBoost treats each row independently — it doesn't care about order. Each row already has temporal context via lag features (Return_Lag_1, MACD_Hist_Lag_5, etc). A chronological split asks "do 2018 patterns predict 2026?" (often no, different regime). Random monthly blocks ensure ALL sets contain samples from ALL market regimes — bull, bear, crash, recovery.
+
+**WHY MONTHLY BLOCKS (not individual random scatter):**
+- Individual scatter + 10-day embargo destroys 67% of data (too many neighbors purged)
+- Monthly blocks keep adjacent days together — embargo only needed at month boundaries
+- Each month has ~21 trading days — enough to learn patterns, not so large as to waste data
+- Result: only ~12% data loss from embargo (vs 67% with individual scatter)
+
+**WHY THE 5-DAY EMBARGO:**
+- Monday in training + Tuesday in test = they share overlapping TP/SL label windows
+- Also their features (RSI, MACD etc) are nearly identical (autocorrelated)
+- ±5 day buffer at month boundaries removes this leakage
+- Based on "Combinatorial Purged Cross-Validation" from Marcos Lopez de Prado's "Advances in Financial Machine Learning"
+
+**Result: train/valid/test all contain samples from 2018 AND 2021 AND 2024** etc. The model must prove it works in ALL regimes, not just one period.
 
 **Triannual walk-forward validation gate:**
 
