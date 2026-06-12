@@ -385,10 +385,19 @@ def optimize_hyperparams(df, feature_cols, n_trials=100, n_jobs=1):
     kwargs = dict(direction="maximize",
                   pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=2))
     if n_jobs > 1:
-        kwargs["storage"] = "sqlite:///:memory:"
+        import tempfile, uuid
+        db_path = os.path.join(tempfile.gettempdir(), f"optuna_{uuid.uuid4().hex[:8]}.db")
+        kwargs["storage"] = f"sqlite:///{db_path}"
 
     study = optuna.create_study(**kwargs)
     study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs, show_progress_bar=(n_jobs == 1))
+
+    # Clean up temp storage file
+    if n_jobs > 1:
+        try:
+            os.remove(db_path)
+        except OSError:
+            pass
 
     print(f"\nBest walk-forward win rate: {study.best_value*100:.1f}%")
     print(f"Best params: {study.best_params}")
