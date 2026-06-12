@@ -46,7 +46,7 @@ def main():
         print("ERROR: target_stocks.txt is empty!")
         sys.exit(1)
 
-    train_script = "train_xgboost_cnn_lstm_experimental.py" if args.deep_learning else "train_xgboost.py"
+    train_script = "train.py"
     model_label = "XGBoost-DeepLearning" if args.deep_learning else "XGBoost"
 
     print(f"{'='*70}")
@@ -91,6 +91,8 @@ def main():
         print(f"  Training ({model_label}, {args.n_trials} trials{adx_label})...")
         train_cmd = [sys.executable, os.path.join(base_dir, train_script),
                      "--csv", csv_path, "--n-trials", str(args.n_trials)]
+        if args.deep_learning:
+            train_cmd.append("--deep-learning")
         if args.min_adx_pctile > 0:
             train_cmd += ["--min-adx-pctile", str(args.min_adx_pctile)]
         train_result = subprocess.run(

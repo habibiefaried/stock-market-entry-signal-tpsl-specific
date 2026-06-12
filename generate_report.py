@@ -9,7 +9,7 @@ import os
 import argparse
 import warnings
 from datetime import datetime
-from train_xgboost import load_and_prepare, optimize_hyperparams, detect_gpu
+from train import load_and_prepare, optimize_hyperparams, detect_gpu, generate_deep_features
 
 # Suppress XGBoost device-mismatch warning (numpy arrays on CPU auto-converted
 # to CUDA DMatrix — harmless performance hint, not a correctness issue)
@@ -384,8 +384,8 @@ def main():
     parser.add_argument("--n-trials", type=int, default=100, help="Number of Optuna trials")
     parser.add_argument("--mc-simulations", type=int, default=10000, help="Monte Carlo simulations")
     parser.add_argument("--mc-trades", type=int, default=252, help="Trades per MC simulation")
-    parser.add_argument("--deep-experimental", action="store_true",
-                        help="Use train_xgboost_cnn_lstm_experimental (LSTM+CNN features)")
+    parser.add_argument("--deep-learning", action="store_true",
+                        help="Add LSTM+CNN deep features (requires PyTorch, GPU recommended)")
     args = parser.parse_args()
 
     # --- Validate inputs ---
@@ -394,25 +394,14 @@ def main():
         print(f"Run first: python fetch_stock_data.py --ticker AAPL")
         return
 
-    if args.deep_experimental:
-        try:
-            import train_xgboost_cnn_lstm_experimental as train_mod
-        except ImportError as e:
-            print(f"ERROR: Cannot import train_xgboost_cnn_lstm_experimental: {e}")
-            print("The experimental module requires PyTorch. Install it:")
-            print("  pip install torch --index-url https://download.pytorch.org/whl/cu121")
-            return
-        model_label = "XGBoost-DeepLearning"
-    else:
-        import train_xgboost as train_mod
-        model_label = "XGBoost"
+    model_label = "XGBoost-DeepLearning" if args.deep_learning else "XGBoost"
 
-    df, feature_cols = train_mod.load_and_prepare(args.csv)
+    df, feature_cols = load_and_prepare(args.csv)
     ticker = os.path.basename(args.csv).split("_")[0]
-    device = train_mod.detect_gpu()
+    device = detect_gpu()
 
-    if args.deep_experimental:
-        df, deep_cols = train_mod.generate_deep_features(df, feature_cols)
+    if args.deep_learning:
+        df, deep_cols = generate_deep_features(df, feature_cols)
         if deep_cols:
             feature_cols = feature_cols + deep_cols
 
@@ -420,7 +409,7 @@ def main():
     print(f"Samples: {len(df)} | Features: {len(feature_cols)} | Device: {device}")
 
     # Optuna tuning (mandatory)
-    best_params = train_mod.optimize_hyperparams(df, feature_cols, args.n_trials)
+    best_params = optimize_hyperparams(df, feature_cols, args.n_trials)
     n_estimators = best_params.pop("n_estimators")
     learning_rate = best_params.pop("learning_rate")
     max_depth = best_params.pop("max_depth")
@@ -519,7 +508,7 @@ def main():
     output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
     os.makedirs(output_dir, exist_ok=True)
     date_str = datetime.now().strftime("%Y%m%d")
-    suffix = "_deep-learning" if args.deep_experimental else ""
+    suffix = "_deep-learning" if args.deep_learning else ""
     output_path = os.path.join(output_dir, f"{ticker}_report_{date_str}{suffix}.html")
     with open(output_path, "w") as f:
         f.write(html)

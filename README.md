@@ -18,7 +18,10 @@ pip install torch --index-url https://download.pytorch.org/whl/cu121
 python fetch_stock_data.py --ticker AAPL
 
 # 2. Train model (Optuna automatically tunes all hyperparameters)
-python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
+python train.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
+
+# 2b. Train with LSTM+CNN deep features (GPU strongly recommended)
+python train.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --deep-learning
 
 # 3. Live trade decision (enter your current price)
 python current.py --ticker AAPL --price 292.45
@@ -34,7 +37,7 @@ python ranking.py --deep-learning         # use LSTM+CNN experimental model
 
 # ── Optional flags ─────────────────────────────────────────────────────
 # ADX trending filter (not recommended as default — see experiments below)
-python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --min-adx-pctile 50
+python train.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --min-adx-pctile 50
 python ranking.py --min-adx-pctile 50
 
 # Tighter TP/SL label window (default 10 days, try 5 for faster signals)
@@ -56,16 +59,16 @@ python current.py --ticker AAPL --price 292.45 --deep
                                 │
                 ┌───────────────┼───────────────┐
                 ▼               ▼               ▼
-┌───────────────────┐ ┌──────────────────────┐ ┌──────────────────────┐
-│ train_xgboost.py  │ │ generate_report.py   │ │ current.py           │
-│                   │ │                      │ │                      │
-│ XGBoost            │ │ HTML report:         │ │ Live trade decision  │
-│ + Optuna tuning   │ │ - Verdict            │ │ - LONG/SHORT + TP/SL │
-│                   │ │ - Equity curve       │ │ - Position sizing    │
-│ Output: models/   │ │ - Monte Carlo        │ │                      │
-└───────────────────┘ │ - Backtest stats     │ └──────────────────────┘
-                      │ Output: output/      │
-                      └──────────────────────┘
+┌────────────────────────┐ ┌──────────────────────┐ ┌──────────────────────┐
+│ train.py               │ │ generate_report.py   │ │ current.py           │
+│                        │ │                      │ │                      │
+│ XGBoost + Optuna       │ │ HTML report:         │ │ Live trade decision  │
+│ --deep-learning for    │ │ - Verdict            │ │ - LONG/SHORT + TP/SL │
+│ LSTM+CNN features      │ │ - Equity curve       │ │ - Position sizing    │
+│ Output: models/        │ │ - Monte Carlo        │ │                      │
+└────────────────────────┘ │ - Backtest stats     │ └──────────────────────┘
+                           │ Output: output/      │
+                           └──────────────────────┘
 
 ## How It Works
 
@@ -80,7 +83,7 @@ Given today's market conditions, should I enter LONG or SHORT to maximize my cha
   - SHORT: did price go DOWN to hit -1.5×ATR before going UP to hit +1×ATR?
 - Outputs clean CSV with zero NaN values
 
-### The Model (train_xgboost.py)
+### The Model (train.py)
 - XGBoost binary classifier: predicts LONG (1) vs SHORT (0)
 - Only uses scale-invariant features (no absolute prices that change over time)
 - **Binary prediction with noise filtering**: LONG (1) or SHORT (0). Drops samples where both directions hit SL (choppy noise). Use confidence threshold at inference to skip uncertain signals.
@@ -105,7 +108,7 @@ An experimental variant that adds 4 learned features from a deep neural network:
 | CNN | 3-layer conv 64→32→16 → fc8 → **2 output** | Pattern encoding (non-linear signals) |
 | Input | 15-day × ~60 key indicators | Key oscillators/ratios only |
 | Training | 30 epochs, CUDA, Adam, CrossEntropyLoss | ~2 min on GPU |
-| XGBoost | Same config as `train_xgboost.py` | Optuna + XGBoostPruningCallback, 500-15000 trees, lr 0.0005-0.2 |
+| XGBoost | Same config as `train.py` | Optuna + XGBoostPruningCallback, 500-15000 trees, lr 0.0005-0.2 |
 
 **Total deep features: 4** (LSTM_0, LSTM_1, CNN_0, CNN_1) — deeper network compresses temporal patterns into a tight bottleneck rather than passing through 24 noisy activations.
 
@@ -195,15 +198,15 @@ Each trial trains XGBoost with a different combination of parameters and scores 
 **Usage:**
 ```bash
 # Default: 100 trials (~5 min on CPU, ~1 min on GPU)
-python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
+python train.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv
 
 # More trials for better results (~10 min on CPU)
-python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --n-trials 200
+python train.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --n-trials 200
 
 # Trending-regime filter: only train on candles where ADX is in top N% of its 60d history
 # Tested values: 0 (default, all data), 50 (top half), 66 (top third)
 # Warning: cutting 50% of data hurts more than it helps on stocks with <2000 samples
-python train_xgboost.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --min-adx-pctile 50
+python train.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --min-adx-pctile 50
 ```
 
 #### Validated Experiments: What Actually Improves Win Rate
@@ -220,7 +223,7 @@ Tested on AAPL, NFLX, AMD (9 years data, 100 Optuna trials each):
 **Conclusion:** The ADX regime filter removes ~50% of training data (500-700 samples), which hurts more than the signal quality gain. The baseline (10-day lookahead, all samples) remains optimal. Confidence of 60-70%+ is achievable through the confidence threshold analysis at inference time — only trade signals where model confidence ≥ 60%.
 
 ### The Report (generate_report.py)
-- Trains model with Optuna (same mandatory tuning as `train_xgboost.py`)
+- Trains model with Optuna (same mandatory tuning as `train.py`)
 - Runs backtest on test set, then runs 10,000 Monte Carlo simulations
 - Generates interactive HTML with Chart.js visualizations
 - Shows: verdict, equity curve, MC probability distribution, feature importance
@@ -258,8 +261,7 @@ XGBoost auto-detects NVIDIA CUDA via PyTorch:
 
 ```
 fetch_stock_data.py                        # Data pipeline
-train_xgboost.py                           # XGBoost + Optuna training
-train_xgboost_cnn_lstm_experimental.py     # Experimental: LSTM+CNN deep features
+train.py                           # XGBoost + Optuna (--deep-learning for LSTM+CNN)
 generate_report.py                         # HTML report generator
 current.py                                 # Live trade decision
 

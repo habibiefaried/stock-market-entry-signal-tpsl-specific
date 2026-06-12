@@ -26,7 +26,7 @@ from datetime import datetime
 warnings.filterwarnings("ignore")
 
 from fetch_stock_data import fetch_ohlcv, compute_atr, compute_technical_indicators
-from train_xgboost import load_and_prepare
+from train import load_and_prepare
 
 
 def find_latest_model(ticker: str, model_dir: str, deep: bool = False):
@@ -104,7 +104,7 @@ def main():
     if model_path is None:
         model_type = "deep" if args.deep else "standard"
         print(f"ERROR: No trained {model_type} model found for {args.ticker}")
-        script = "train_xgboost_cnn_lstm_experimental.py" if args.deep else "train_xgboost.py"
+        script = "train.py --deep-learning" if args.deep else "train.py"
         print(f"Run first: python {script} --csv data/{args.ticker}_tpsl_data_YYYYMMDD.csv")
         return
 
@@ -138,7 +138,7 @@ def main():
     missing = [f for f in feature_cols if f not in df.columns]
     if missing:
         print(f"ERROR: Missing features: {missing[:5]}...")
-        print("Retrain model with: python train_xgboost.py --csv data/{ticker}_tpsl_data_YYYYMMDD.csv")
+        print("Retrain model with: python train.py --csv data/{ticker}_tpsl_data_YYYYMMDD.csv")
         return
 
     # Predict using the latest completed candle's indicators
