@@ -807,6 +807,99 @@ def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # === MA Oscillator ===
     df["MA_Osc_10_30"] = (close.rolling(10).mean() - close.rolling(30).mean()) / close.rolling(30).mean() * 100
 
+    # ==========================================================================
+    # OPTION 1: Contextual multi-candle interaction features
+    # These encode COMPOUND signals — not just "did pattern X happen?" but
+    # "did pattern X happen in a meaningful context?"
+    # ==========================================================================
+
+    atr_series = df["ATR"]
+    vol_ratio = volume / volume.rolling(20).mean()
+
+    # Bounce-after-drop: green candle after N consecutive red candles
+    # The TSLA scenario — is this a genuine reversal or just relief?
+    consec_red_3 = (body.shift(1) < 0) & (body.shift(2) < 0) & (body.shift(3) < 0)
+    consec_red_5 = consec_red_3 & (body.shift(4) < 0) & (body.shift(5) < 0)
+    df["Bounce_After_3_Red"] = (consec_red_3 & (body > 0)).astype(int)
+    df["Bounce_After_5_Red"] = (consec_red_5 & (body > 0)).astype(int)
+
+    # Failed bounce: green candle after red run, but didn't close above prior candle's high (weak bounce)
+    df["Failed_Bounce"] = (consec_red_3 & (body > 0) & (close < high.shift(1))).astype(int)
+
+    # Drop depth over last N days: how far price has fallen (normalized by ATR)
+    drop_5d = (close - close.rolling(5).max()) / atr_series.replace(0, np.nan).fillna(1)
+    drop_3d = (close - close.rolling(3).max()) / atr_series.replace(0, np.nan).fillna(1)
+    df["Drop_Depth_5d"] = drop_5d.clip(-10, 0)   # negative = fell, 0 = at high
+    df["Drop_Depth_3d"] = drop_3d.clip(-10, 0)
+
+    # Rally depth: how far price has risen over last N days
+    rally_5d = (close - close.rolling(5).min()) / atr_series.replace(0, np.nan).fillna(1)
+    df["Rally_Depth_5d"] = rally_5d.clip(0, 10)
+
+    # Multi-candle patterns WITH volume confirmation (volume > 1.5× average)
+    high_volume = vol_ratio > 1.5
+    df["Bullish_Engulf_HighVol"] = ((df["Bullish_Engulfing"] == 1) & high_volume).astype(int)
+    df["Bearish_Engulf_HighVol"] = ((df["Bearish_Engulfing"] == 1) & high_volume).astype(int)
+    df["Three_Black_Crows_HighVol"] = ((df["Three_Black_Crows"] == 1) & high_volume).astype(int)
+    df["Three_White_Soldiers_HighVol"] = ((df["Three_White_Soldiers"] == 1) & high_volume).astype(int)
+
+    # Exhaustion: long candle after extended run (likely reversal)
+    big_candle = body_abs >= atr_series * 1.5
+    df["Bullish_Exhaustion"] = (big_candle & (body > 0) & (rally_5d > 3)).astype(int)
+    df["Bearish_Exhaustion"] = (big_candle & (body < 0) & (drop_5d < -3)).astype(int)
+
+    # Doji after trend: more meaningful than doji in isolation
+    doji_mask = df["Doji"] == 1
+    downtrend_3d = (close < close.shift(1)) & (close.shift(1) < close.shift(2)) & (close.shift(2) < close.shift(3))
+    uptrend_3d = (close > close.shift(1)) & (close.shift(1) > close.shift(2)) & (close.shift(2) > close.shift(3))
+    df["Doji_In_Downtrend"] = (doji_mask & downtrend_3d).astype(int)
+    df["Doji_In_Uptrend"] = (doji_mask & uptrend_3d).astype(int)
+
+    # Inside bar after big move (compression = breakout likely)
+    big_move_prior = body_abs.shift(1) >= atr_series.shift(1) * 1.2
+    df["Inside_Bar_After_Big_Move"] = ((df["Inside_Bar"] == 1) & big_move_prior).astype(int)
+
+    # ==========================================================================
+    # OPTION 2: Pattern strength as continuous value (not just binary 0/1)
+    # Encodes HOW STRONG the pattern is, not just whether it occurred
+    # ==========================================================================
+
+    # Three Black Crows magnitude: total body size / ATR (higher = stronger signal)
+    three_crows_mask = df["Three_Black_Crows"] == 1
+    crows_magnitude = (body_abs + body_abs.shift(1) + body_abs.shift(2)) / atr_series.replace(0, np.nan).fillna(1)
+    df["Three_Black_Crows_Magnitude"] = np.where(three_crows_mask, crows_magnitude.clip(0, 10), 0)
+
+    # Three White Soldiers magnitude
+    three_soldiers_mask = df["Three_White_Soldiers"] == 1
+    soldiers_magnitude = (body_abs + body_abs.shift(1) + body_abs.shift(2)) / atr_series.replace(0, np.nan).fillna(1)
+    df["Three_White_Soldiers_Magnitude"] = np.where(three_soldiers_mask, soldiers_magnitude.clip(0, 10), 0)
+
+    # Engulfing magnitude: how much bigger is the engulfing candle vs prior
+    engulf_ratio = body_abs / body_abs.shift(1).replace(0, np.nan).fillna(1)
+    df["Bullish_Engulf_Magnitude"] = np.where(df["Bullish_Engulfing"] == 1, engulf_ratio.clip(1, 5), 0)
+    df["Bearish_Engulf_Magnitude"] = np.where(df["Bearish_Engulfing"] == 1, engulf_ratio.clip(1, 5), 0)
+
+    # Morning/Evening Star strength: how deep the middle doji gaps and how far reversal closes
+    morning_mask = df["Morning_Star"] == 1
+    df["Morning_Star_Strength"] = np.where(morning_mask,
+        ((close - (open_price.shift(2) + close.shift(2)) / 2) / atr_series.replace(0, np.nan).fillna(1)).clip(0, 5), 0)
+
+    evening_mask = df["Evening_Star"] == 1
+    df["Evening_Star_Strength"] = np.where(evening_mask,
+        (((open_price.shift(2) + close.shift(2)) / 2 - close) / atr_series.replace(0, np.nan).fillna(1)).clip(0, 5), 0)
+
+    # Hammer/Shooting Star wick ratio: longer wick = stronger signal
+    df["Hammer_Strength"] = np.where(df["Hammer"] == 1,
+        (lower_wick / atr_series.replace(0, np.nan).fillna(1)).clip(0, 5), 0)
+    df["Shooting_Star_Strength"] = np.where(df["Shooting_Star"] == 1,
+        (upper_wick / atr_series.replace(0, np.nan).fillna(1)).clip(0, 5), 0)
+
+    # Consecutive candle run strength: N red/green candles × avg body size / ATR
+    run_magnitude_down = df["Consecutive_Down"] * body_abs.rolling(3).mean() / atr_series.replace(0, np.nan).fillna(1)
+    run_magnitude_up = df["Consecutive_Up"] * body_abs.rolling(3).mean() / atr_series.replace(0, np.nan).fillna(1)
+    df["Bear_Run_Strength"] = run_magnitude_down.clip(0, 15).fillna(0)
+    df["Bull_Run_Strength"] = run_magnitude_up.clip(0, 15).fillna(0)
+
     df = df.copy()
     return df
 

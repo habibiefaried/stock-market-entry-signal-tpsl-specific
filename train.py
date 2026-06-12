@@ -332,19 +332,27 @@ def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1, trial=N
 
         n_long = y_train.sum()
         n_short = len(y_train) - n_long
-        sw = n_short / n_long if n_long > 0 else 1.0
+        sw_class = n_short / n_long if n_long > 0 else 1.0
+
+        # Recency weighting in CV folds too
+        decay = 0.9995
+        n_cv = len(y_train)
+        rec_w = np.array([decay ** (n_cv - 1 - i) for i in range(n_cv)])
+        cls_w = np.where(y_train == 1, sw_class, 1.0)
+        sw = rec_w * cls_w
+        sw = sw / sw.mean()
 
         callbacks = [XGBoostPruningCallback(trial, "validation_0-logloss")] if trial else None
         model = xgb.XGBClassifier(
             **params,
-            scale_pos_weight=sw,
             objective="binary:logistic",
             eval_metric="logloss",
             random_state=42,
             early_stopping_rounds=30,
             callbacks=callbacks,
         )
-        model.fit(X_train_s, y_train, eval_set=[(X_test_s, test_df["TARGET"].values)], verbose=False)
+        model.fit(X_train_s, y_train, eval_set=[(X_test_s, test_df["TARGET"].values)],
+                  sample_weight=sw, verbose=False)
 
         y_pred = model.predict(X_test_s)
         correct = sum(
@@ -540,6 +548,18 @@ def train_model(csv_path: str, train_ratio: float = 0.8, n_trials: int = 100,
     n_short = len(y_train) - n_long
     scale_weight = n_short / n_long if n_long > 0 else 1.0
 
+    # Option 3: Recency weighting — recent samples weighted more heavily.
+    # Rationale: a stock's patterns from 2018 may not reflect its 2025 behaviour.
+    # We use exponential decay: most recent sample gets weight 1.0,
+    # oldest sample gets weight decay^(n-1). decay=0.9995 ≈ half-weight at ~1400 samples back.
+    decay = 0.9995
+    n_train = len(y_train)
+    recency_weights = np.array([decay ** (n_train - 1 - i) for i in range(n_train)])
+    # Combine with class balance: multiply recency by per-class scale
+    class_weights = np.where(y_train == 1, scale_weight, 1.0)
+    sample_weights = recency_weights * class_weights
+    sample_weights = sample_weights / sample_weights.mean()  # normalise to mean=1
+
     model_params = {
         "n_estimators": n_estimators,
         "learning_rate": learning_rate,
@@ -563,7 +583,11 @@ def train_model(csv_path: str, train_ratio: float = 0.8, n_trials: int = 100,
     train_start = time.time()
     model = xgb.XGBClassifier(**model_params)
     # Use VALID set for early stopping (not TEST — that stays locked)
-    model.fit(X_train_scaled, y_train, eval_set=[(X_valid_scaled, valid_df["TARGET"].values)], verbose=False)
+    # Apply recency + class balance weights (recent samples count more)
+    model.fit(X_train_scaled, y_train,
+              eval_set=[(X_valid_scaled, valid_df["TARGET"].values)],
+              sample_weight=sample_weights,
+              verbose=False)
     train_time = time.time() - train_start
     print(f"Final model training time: {train_time:.1f}s")
 

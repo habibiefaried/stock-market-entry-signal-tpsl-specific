@@ -444,6 +444,14 @@ def main():
     n_short = len(y_train) - n_long
     scale_weight = n_short / n_long if n_long > 0 else 1.0
 
+    # Recency weighting
+    decay = 0.9995
+    n_tr = len(y_train)
+    rec_w = np.array([decay ** (n_tr - 1 - i) for i in range(n_tr)])
+    cls_w = np.where(y_train == 1, scale_weight, 1.0)
+    sample_weights = rec_w * cls_w
+    sample_weights = sample_weights / sample_weights.mean()
+
     model_params = {
         "n_estimators": n_estimators,
         "learning_rate": learning_rate,
@@ -464,7 +472,10 @@ def main():
         model_params["device"] = device
 
     model = xgb.XGBClassifier(**model_params)
-    model.fit(X_train_scaled, y_train, eval_set=[(X_valid_scaled, valid_df["TARGET"].values)], verbose=False)
+    model.fit(X_train_scaled, y_train,
+              eval_set=[(X_valid_scaled, valid_df["TARGET"].values)],
+              sample_weight=sample_weights,
+              verbose=False)
 
     # Predictions
     y_pred_valid = model.predict(X_valid_scaled)

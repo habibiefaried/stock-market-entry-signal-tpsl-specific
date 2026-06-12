@@ -272,6 +272,49 @@ Tested on AAPL, NFLX, AMD (9 years data, 100 Optuna trials each):
 
 **Conclusion:** The ADX regime filter removes ~50% of training data (500-700 samples), which hurts more than the signal quality gain. The baseline (10-day lookahead, all samples) remains optimal. Confidence of 60-70%+ is achievable through the confidence threshold analysis at inference time — only trade signals where model confidence ≥ 60%.
 
+### Model Improvements: Options 1-3
+
+#### Option 1: Contextual multi-candle interaction features
+XGBoost sees each row independently with no sequential memory. Simply having `Three_Black_Crows = 1` tells it the pattern occurred — but not whether it happened after a huge volume day, or at an extreme RSI level. New contextual features encode compound signals:
+
+| Feature | What it encodes |
+|---------|----------------|
+| `Bounce_After_3_Red` | Green candle after 3 consecutive red candles (the TSLA scenario) |
+| `Bounce_After_5_Red` | Green candle after 5 consecutive red candles (deeper rebound) |
+| `Failed_Bounce` | Green candle after drop, but close < prior high (weak relief rally) |
+| `Drop_Depth_5d` | How far price fell in last 5 days, normalised by ATR (-10 to 0) |
+| `Rally_Depth_5d` | How far price rose in last 5 days, normalised by ATR (0 to 10) |
+| `Bullish/Bearish_Engulf_HighVol` | Engulfing pattern confirmed by volume spike (>1.5× avg) |
+| `Three_Black/White_*_HighVol` | 3-candle patterns with volume confirmation |
+| `Bullish/Bearish_Exhaustion` | Big candle after extended run = likely reversal |
+| `Doji_In_Downtrend/Uptrend` | Doji within established trend = more meaningful indecision |
+| `Inside_Bar_After_Big_Move` | Compression (inside bar) right after a large candle = breakout setup |
+
+#### Option 2: Pattern strength as continuous value (not binary 0/1)
+Previously `Three_Black_Crows = 1` whether the 3 candles fell 1% or 15%. Now each pattern includes a magnitude feature:
+
+| Feature | Formula | Meaning |
+|---------|---------|---------|
+| `Three_Black_Crows_Magnitude` | sum(3 bodies) / ATR | Higher = stronger bearish signal |
+| `Three_White_Soldiers_Magnitude` | sum(3 bodies) / ATR | Higher = stronger bullish signal |
+| `Bullish/Bearish_Engulf_Magnitude` | engulf_body / prior_body | How much bigger the engulfing candle is |
+| `Morning/Evening_Star_Strength` | reversal close distance / ATR | How far reversal candle penetrates |
+| `Hammer/Shooting_Star_Strength` | wick_length / ATR | Longer wick = stronger rejection |
+| `Bear/Bull_Run_Strength` | consecutive_candles × avg_body / ATR | Momentum of the run |
+
+#### Option 3: Recency weighting
+XGBoost treats AAPL data from 2017 equally to 2025 data. But stocks change behaviour over time (different products, different market regime, different volatility). We apply exponential decay weighting:
+
+```
+weight[i] = 0.9995^(n - 1 - i) × class_weight[i]
+
+decay = 0.9995 → most recent sample = weight 1.0
+                  sample from 1400 rows back ≈ half weight
+                  sample from 2800 rows back ≈ quarter weight
+```
+
+Class balance weight is multiplied on top, so both recency AND class imbalance are handled simultaneously. Applied in both Optuna walk-forward CV and final model training.
+
 ### New Indicators Added (from TT library audit)
 
 | Indicator | Formula summary | Why it helps |
