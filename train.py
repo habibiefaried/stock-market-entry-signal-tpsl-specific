@@ -467,7 +467,8 @@ def _find_best_threshold_optuna(df_valid, y_pred_valid, y_prob_valid, n_trials=4
 
 
 def train_model(csv_path: str, train_ratio: float = 0.8, n_trials: int = None,
-                use_deep: bool = None, min_adx_pctile: float = 0.0):
+                use_deep: bool = None, min_adx_pctile: float = 0.0,
+                force_save: bool = False):
     """
     Train XGBoost classifier: predict LONG(1) vs SHORT(0).
 
@@ -658,7 +659,7 @@ def train_model(csv_path: str, train_ratio: float = 0.8, n_trials: int = None,
         if r["total"] > 0:
             print(f"  {thresh:>10.2f} {r['total']:>7} {skip_pct:>6.1f}% {r['wr']:>9.1f}% {r['edge']:>+8.3f}R{marker}")
 
-    # Save model artifacts
+    # ── Save model — only overwrite if this run is better than existing ──
     ticker = os.path.basename(csv_path).split("_")[0]
     date_str = datetime.now().strftime("%Y%m%d")
     model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
@@ -669,16 +670,33 @@ def train_model(csv_path: str, train_ratio: float = 0.8, n_trials: int = None,
     scaler_path    = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_scaler.pkl")
     features_path  = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_features.txt")
     threshold_path = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_threshold.txt")
+    perf_path      = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_perf.txt")
 
-    model.save_model(model_path)
-    joblib.dump(scaler, scaler_path)
-    with open(features_path, "w") as f:
-        f.write("\n".join(feature_cols))
-    with open(threshold_path, "w") as f:
-        f.write(str(best_thresh))
+    # Score = edge at optimised threshold (higher = better)
+    new_score = opt["edge"]
+    existing_score = -999.0
+    if os.path.exists(perf_path):
+        try:
+            with open(perf_path) as f:
+                existing_score = float(f.read().strip())
+        except (ValueError, IOError):
+            pass
 
-    print(f"\nModel saved to:     {model_path}")
-    print(f"Threshold saved to: {threshold_path}  (value: {best_thresh:.2f})")
+    if force_save or new_score > existing_score:
+        model.save_model(model_path)
+        joblib.dump(scaler, scaler_path)
+        with open(features_path, "w") as f:
+            f.write("\n".join(feature_cols))
+        with open(threshold_path, "w") as f:
+            f.write(str(best_thresh))
+        with open(perf_path, "w") as f:
+            f.write(str(new_score))
+        print(f"\nNew best model saved (edge {new_score:+.3f}R > previous {existing_score:+.3f}R)")
+        print(f"  Model:     {model_path}")
+        print(f"  Threshold: {threshold_path}  (value: {best_thresh:.2f})")
+    else:
+        print(f"\nExisting model is better (edge {existing_score:+.3f}R >= new {new_score:+.3f}R) — not overwriting")
+        print(f"  Run again or use --force-save to overwrite anyway")
 
     # Latest candle prediction
     print(f"\n{'='*50}")
@@ -734,6 +752,8 @@ Override examples:
                         help="Force disable LSTM+CNN deep features")
     parser.add_argument("--min-adx-pctile", type=float, default=0.0,
                         help="Only train on trending regimes: 0=all (default), 50=top half ADX")
+    parser.add_argument("--force-save", action="store_true",
+                        help="Overwrite saved model even if new run scores lower")
     args = parser.parse_args()
 
     if not os.path.exists(args.csv):
@@ -749,7 +769,8 @@ Override examples:
     else:
         use_deep = None  # auto
 
-    train_model(args.csv, 0.8, args.n_trials, use_deep, args.min_adx_pctile)
+    train_model(args.csv, 0.8, args.n_trials, use_deep, args.min_adx_pctile,
+                force_save=args.force_save)
 
 
 if __name__ == "__main__":

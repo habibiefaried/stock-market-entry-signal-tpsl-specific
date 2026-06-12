@@ -151,6 +151,20 @@ python train_xgboost_cnn_lstm_experimental.py --csv data/AAPL_tpsl_data_YYYYMMDD
 python generate_report.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --deep-experimental
 ```
 
+#### Best Model Persistence
+
+`train.py` compares the new model's test-set edge against the previously saved model. It only overwrites if the new run is better:
+
+```
+New run edge: +0.350R > Saved edge: +0.221R → Save new model ✔
+New run edge: +0.172R < Saved edge: +0.221R → Keep saved model ✔
+```
+
+This means you can run `train.py` multiple times (e.g., to try more Optuna trials) and the best result is always preserved. `generate_report.py` and `current.py` always use the saved (best) model — they never retrain.
+
+Score stored in `models/{TICKER}_{date}_xgboost_perf.txt`.
+Use `--force-save` to overwrite regardless: `python train.py --csv ... --force-save`
+
 #### Confidence Threshold — How It Works
 
 The threshold is the minimum confidence required to enter a trade. Instead of guessing (e.g., always use 60%), we let Optuna find the sweet spot on the validation set:
@@ -348,6 +362,8 @@ Class balance weight is multiplied on top, so both recency AND class imbalance a
 - Shows: threshold-aware verdict, equity curve, MC, feature importance
 
 ### Live Decision (current.py)
+**Never retrains.** Loads saved model artifacts from `models/`. If no model exists for the ticker, it exits with a clear error message and tells you to run `train.py` first.
+
 Loads the saved confidence threshold from `models/{TICKER}_*_threshold.txt` (written by `train.py` / `generate_report.py`) and shows whether today's signal clears it:
 ```
 VERDICT:    ▲ LONG
