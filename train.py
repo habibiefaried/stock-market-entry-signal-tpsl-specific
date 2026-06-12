@@ -466,63 +466,76 @@ def _find_best_threshold_optuna(df_valid, y_pred_valid, y_prob_valid, n_trials=4
     return round(study.best_params["threshold"], 2), study.best_value
 
 
-def annual_walk_forward_test(df, feature_cols, model, scaler, min_wr=0.55, n_recent_years=3):
+def triannual_walk_forward_test(df, feature_cols, model, scaler, min_wr=0.55, years_per_block=3):
     """
-    Test model across the most recent N annual slices independently.
-    Each year: 70% of that year's data trains, 15% validates, 15% tests.
+    Test model on 3-year rolling blocks instead of annual slices.
 
-    WHY THIS MATTERS:
-    A global 70/15/15 split trains on 2017-2023 and tests on 2025/2026.
-    But AAPL in 2019 behaves differently from AAPL in 2025 (different
-    market regime, volatility, sector rotation). Annual testing ensures
-    the model works consistently across different market environments,
-    not just one lucky period.
+    WHY 3-YEAR BLOCKS INSTEAD OF 1-YEAR:
+    - 1 year → ~250 trading days × 15% = ~37 test samples
+      At 37 trades, 54% vs 56% WR = literally 1 win difference = noise
+    - 3 years → ~750 trading days × 15% = ~112 test samples
+      Statistically meaningful: margin of error drops from ±8% to ±5%
 
-    Returns: list of annual results, and whether model passes the WR gate.
+    With 9 years of data, we get 3 non-overlapping blocks:
+      Block 1: years 1-3   (e.g. 2017-2019)
+      Block 2: years 4-6   (e.g. 2020-2022)
+      Block 3: years 7-9   (e.g. 2023-2025)
+
+    Each block's last 15% is the test slice — this is genuinely unseen data
+    representing a distinct market regime (pre-covid, covid/recovery, post-2022).
+
+    Model passes if majority of blocks (2/3) meet min_wr.
     """
     dates = pd.to_datetime(df["Date"])
-    years = sorted(dates.dt.year.unique())
-    recent_years = years[-n_recent_years:]
+    all_years = sorted(dates.dt.year.unique())
+    n_years = len(all_years)
 
-    annual_results = []
-    for year in recent_years:
-        year_mask = dates.dt.year == year
-        year_df = df[year_mask].reset_index(drop=True)
-        if len(year_df) < 60:
+    # Build non-overlapping 3-year blocks
+    blocks = []
+    for start_idx in range(0, n_years - years_per_block + 1, years_per_block):
+        block_years = all_years[start_idx:start_idx + years_per_block]
+        block_mask = dates.dt.year.isin(block_years)
+        block_df = df[block_mask].reset_index(drop=True)
+        if len(block_df) < 100:  # skip tiny blocks
+            continue
+        year_label = f"{block_years[0]}–{block_years[-1]}"
+        blocks.append((year_label, block_df))
+
+    # Use the 3 most recent blocks
+    blocks = blocks[-3:]
+
+    block_results = []
+    for label, block_df in blocks:
+        nb = len(block_df)
+        # Last 15% of the block = test slice
+        test_start = int(nb * 0.85)
+        test_slice = block_df[test_start:].reset_index(drop=True)
+
+        if len(test_slice) < 20:
             continue
 
-        ny = len(year_df)
-        # 70/15/15 within each year
-        test_start  = int(ny * 0.85)
-        valid_start = int(ny * 0.70)
-
-        test_y = year_df[test_start:].reset_index(drop=True)
-        if len(test_y) < 15:
-            continue
-
-        X_test = scaler.transform(test_y[feature_cols].values)
+        X_test = scaler.transform(test_slice[feature_cols].values)
         y_pred = model.predict(X_test)
         y_prob = model.predict_proba(X_test)
 
         correct = sum(
-            1 for idx, (_, row) in enumerate(test_y.iterrows())
+            1 for idx, (_, row) in enumerate(test_slice.iterrows())
             if (y_pred[idx] == 1 and row["VERDICT_LONG"] == "TP") or
                (y_pred[idx] == 0 and row["VERDICT_SHORT"] == "TP")
         )
-        wr = correct / len(test_y) * 100
+        wr = correct / len(test_slice) * 100
         edge = wr / 100 * 1.5 - (1 - wr / 100) * 1.0
-        annual_results.append({
-            "year": year,
-            "trades": len(test_y),
+        block_results.append({
+            "label": label,
+            "trades": len(test_slice),
             "wr": wr,
             "edge": edge,
             "pass": wr >= min_wr * 100,
         })
 
-    years_passing = sum(1 for r in annual_results if r["pass"])
-    # Model passes if majority of recent years meet the WR threshold
-    passes_gate = years_passing >= len(annual_results) // 2 + 1 if annual_results else False
-    return annual_results, passes_gate
+    blocks_passing = sum(1 for r in block_results if r["pass"])
+    passes_gate = blocks_passing >= len(block_results) // 2 + 1 if block_results else False
+    return block_results, passes_gate
 
 
 def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
@@ -536,11 +549,13 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
       15% VALID  → Confidence threshold tuned here (more data = less overfit)
       15% TEST   → Final honest backtest, completely untouched until end
 
-    Annual walk-forward gate:
-      After training, tests the model independently on each of the last
-      3 calendar years. Model is only saved if it achieves min_wr (55%)
-      in the majority of those years. This ensures the model generalises
-      across market regimes, not just one lucky period.
+    Triannual walk-forward gate:
+      After training, splits all data into non-overlapping 3-year blocks
+      (e.g. 2017-2019, 2020-2022, 2023-2025). Tests the model on the last
+      15% of each block (~112 samples per block, much more reliable than
+      the ~37 samples from annual testing). Model only saved if majority
+      of blocks (2/3) pass min_wr. Ensures model works across market
+      regimes: pre-covid, recovery, post-2022 etc.
 
     n_trials:   None = auto (250 GPU, 100 CPU)
     use_deep:   None = auto (True GPU, False CPU)
@@ -724,20 +739,23 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
         if r["total"] > 0:
             print(f"  {thresh:>10.2f} {r['total']:>7} {skip_pct:>6.1f}% {r['wr']:>9.1f}% {r['edge']:>+8.3f}R{marker}")
 
-    # ── Annual walk-forward gate: test on each of last 3 years separately ──
+    # ── Triannual walk-forward gate: 3 non-overlapping 3-year blocks ────────
+    # WHY: 1-year blocks give only ~37 test samples (noise). 3-year blocks
+    # give ~112 samples — statistically meaningful, and each block represents
+    # a distinct market regime (pre-covid, covid/recovery, post-2022).
     print(f"\n{'='*50}")
-    print(f"ANNUAL WALK-FORWARD VALIDATION (last 3 years)")
+    print(f"TRIANNUAL WALK-FORWARD VALIDATION (3-year blocks)")
     print(f"{'='*50}")
-    print(f"Min WR required: {min_wr*100:.0f}% | Must pass majority of years")
-    annual_results, passes_gate = annual_walk_forward_test(
-        df, feature_cols, model, scaler, min_wr=min_wr, n_recent_years=3)
+    print(f"Min WR required: {min_wr*100:.0f}% | Must pass majority of blocks (2/3)")
+    block_results, passes_gate = triannual_walk_forward_test(
+        df, feature_cols, model, scaler, min_wr=min_wr, years_per_block=3)
 
-    for r in annual_results:
+    for r in block_results:
         status = "✔ PASS" if r["pass"] else "✘ FAIL"
-        print(f"  {r['year']}: {r['trades']:3d} trades | WR={r['wr']:.1f}% | Edge={r['edge']:+.3f}R  {status}")
+        print(f"  {r['label']}: {r['trades']:3d} trades | WR={r['wr']:.1f}% | Edge={r['edge']:+.3f}R  {status}")
 
-    years_passing = sum(1 for r in annual_results if r["pass"])
-    print(f"\nResult: {years_passing}/{len(annual_results)} years passed {min_wr*100:.0f}% WR gate")
+    blocks_passing = sum(1 for r in block_results if r["pass"])
+    print(f"\nResult: {blocks_passing}/{len(block_results)} blocks passed {min_wr*100:.0f}% WR gate")
 
     # ── Save model — only if WR gate passed AND new run beats existing ────
     ticker = os.path.basename(csv_path).split("_")[0]

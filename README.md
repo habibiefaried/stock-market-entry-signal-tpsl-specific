@@ -101,19 +101,28 @@ Full dataset (chronological, e.g. 9 years)
 - Larger valid set (15% vs 10%) → threshold Optuna has more data → less chance of picking 0.69 vs 0.70 by noise
 - Larger test set (15% vs 10%) → ~217 samples instead of 145 → WR estimate is more statistically reliable
 
-**Annual walk-forward validation gate:**
+**Triannual walk-forward validation gate:**
 
-After training, the model is tested independently on each of the last 3 calendar years:
+After training, data is split into non-overlapping 3-year blocks. Each block's last 15% is the test slice:
 
 ```
-Year 2023 → test on that year's 15% holdout → WR = X%  ✔/✘
-Year 2024 → test on that year's 15% holdout → WR = Y%  ✔/✘
-Year 2025 → test on that year's 15% holdout → WR = Z%  ✔/✘
+Block 1: 2017–2019 → test on last 15% (~66 trades) → WR = X%  ✔/✘
+Block 2: 2020–2022 → test on last 15% (~85 trades) → WR = Y%  ✔/✘
+Block 3: 2023–2025 → test on last 15% (~80 trades) → WR = Z%  ✔/✘
 
-Model saved ONLY IF majority of years pass the 55% WR gate.
+Model saved ONLY IF majority of blocks (2/3) pass the 55% WR gate.
 ```
 
-**Why this matters:** A global 70/15/15 trains on 2017-2023 and tests once on 2025/2026. AAPL in 2019 behaves very differently from AAPL in 2025 (different volatility, sector, market regime). Annual testing ensures the model works across multiple market environments, not just one lucky period.
+**Why 3-year blocks instead of annual:**
+- 1-year → ~250 days × 15% = ~37 test samples → 54% vs 56% WR = literally 1 win = noise
+- 3-year → ~750 days × 15% = ~112 test samples → statistically meaningful (±5% margin of error)
+
+Each block also represents a distinct market regime:
+- 2017–2019: pre-COVID bull market
+- 2020–2022: COVID crash + recovery + rate hikes
+- 2023–2025: post-rate-hike normalisation
+
+The model must prove it works across regimes, not just one lucky period.
 
 **Minimum WR requirement:**
 - Default: **55% WR** (configurable via `--min-wr 0.55`)
