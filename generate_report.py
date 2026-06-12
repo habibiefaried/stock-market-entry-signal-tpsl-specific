@@ -9,8 +9,8 @@ import os
 import argparse
 import warnings
 from datetime import datetime
-from train import (load_and_prepare, optimize_hyperparams, detect_gpu,
-                   generate_deep_features, _backtest_at_threshold, _find_best_threshold_optuna)
+from train import (load_and_prepare, detect_gpu,
+                   generate_deep_features, _backtest_at_threshold)
 
 # Suppress XGBoost device-mismatch warning (numpy arrays on CPU auto-converted
 # to CUDA DMatrix — harmless performance hint, not a correctness issue)
@@ -403,103 +403,63 @@ def main():
         print(f"Run first: python fetch_stock_data.py --ticker AAPL")
         return
 
-    df, feature_cols = load_and_prepare(args.csv)
     ticker = os.path.basename(args.csv).split("_")[0]
+    date_str = os.path.basename(args.csv).split("_tpsl_data_")[1].replace(".csv", "")
     device = detect_gpu()
     gpu_available = device != "cpu"
 
-    # Auto-configure based on hardware
-    if args.n_trials is None:
-        args.n_trials = 250 if gpu_available else 100
+    # Resolve deep flag
     if args.no_deep:
         use_deep = False
-    elif use_deep:
+    elif args.deep_learning:
         use_deep = True
     else:
-        use_deep = gpu_available  # auto: ON with GPU, OFF without
+        use_deep = gpu_available
 
+    suffix = "_deep" if use_deep else ""
     model_label = "XGBoost-DeepLearning" if use_deep else "XGBoost"
-    print(f"Hardware: {device} → n_trials={args.n_trials}, deep_learning={'ON' if use_deep else 'OFF'} (auto)")
 
-    if use_deep:
-        df, deep_cols = generate_deep_features(df, feature_cols)
-        if deep_cols:
-            feature_cols = feature_cols + deep_cols
+    # ── Try to load existing model (avoid retraining inconsistency) ───────
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    model_dir = os.path.join(base_dir, "models")
+    model_path     = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_model.json")
+    scaler_path    = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_scaler.pkl")
+    features_path  = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_features.txt")
+    threshold_path = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_threshold.txt")
 
-    print(f"Training model for {ticker} ({model_label})...")
-    print(f"Samples: {len(df)} | Features: {len(feature_cols)} | Device: {device}")
+    if not all(os.path.exists(p) for p in [model_path, scaler_path, features_path, threshold_path]):
+        print(f"ERROR: No trained model found for {ticker} {date_str} ({suffix or 'standard'})")
+        print(f"Run first:")
+        print(f"  python train.py --csv {args.csv}")
+        return
 
-    # ── 3-way chronological split (same as train.py, no leakage) ─────────
+    # ── Load saved model (single source of truth — matches current.py exactly) ──
+    print(f"Loading model: {os.path.basename(model_path)}")
+    model = xgb.XGBClassifier()
+    model.load_model(model_path)
+    scaler = joblib.load(scaler_path)
+    with open(features_path) as f:
+        feature_cols = [line.strip() for line in f.readlines()]
+    with open(threshold_path) as f:
+        best_threshold = float(f.read().strip())
+    print(f"Model loaded | Threshold: {best_threshold:.2f} | Features: {len(feature_cols)}")
+
+    # Load + prepare data for test set evaluation and report
+    df, _ = load_and_prepare(args.csv)
     n = len(df)
-    train_end = int(n * 0.80)
-    valid_end = int(n * 0.90)
-    train_df = df[:train_end]
-    valid_df = df[train_end:valid_end].reset_index(drop=True)
-    test_df  = df[valid_end:].reset_index(drop=True)
-    print(f"Split: Train={len(train_df)} | Valid={len(valid_df)} | Test={len(test_df)}")
+    train_df = df[:int(n * 0.80)]
+    test_df  = df[int(n * 0.90):].reset_index(drop=True)
+    print(f"Test set: {len(test_df)} samples ({test_df.iloc[0]['Date'][:10]} → {test_df.iloc[-1]['Date'][:10]})")
 
-    # Optuna tuning on TRAIN only
-    best_params = optimize_hyperparams(train_df, feature_cols, args.n_trials)
-    n_estimators = best_params.pop("n_estimators")
-    learning_rate = best_params.pop("learning_rate")
-    max_depth = best_params.pop("max_depth")
+    X_test = test_df[feature_cols].values
+    y_test = test_df["TARGET"].values
+    X_test_scaled = scaler.transform(X_test)
 
-    X_train = train_df[feature_cols].values
-    y_train = train_df["TARGET"].values
-    X_valid = valid_df[feature_cols].values
-    X_test  = test_df[feature_cols].values
-    y_test  = test_df["TARGET"].values
-
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_valid_scaled = scaler.transform(X_valid)
-    X_test_scaled  = scaler.transform(X_test)
-
-    n_long = y_train.sum()
-    n_short = len(y_train) - n_long
-    scale_weight = n_short / n_long if n_long > 0 else 1.0
-
-    # Recency weighting
-    decay = 0.9995
-    n_tr = len(y_train)
-    rec_w = np.array([decay ** (n_tr - 1 - i) for i in range(n_tr)])
-    cls_w = np.where(y_train == 1, scale_weight, 1.0)
-    sample_weights = rec_w * cls_w
-    sample_weights = sample_weights / sample_weights.mean()
-
-    model_params = {
-        "n_estimators": n_estimators,
-        "learning_rate": learning_rate,
-        "max_depth": max_depth,
-        "subsample": best_params.get("subsample", 0.8),
-        "colsample_bytree": best_params.get("colsample_bytree", 0.8),
-        "min_child_weight": best_params.get("min_child_weight", 1),
-        "gamma": best_params.get("gamma", 0.0),
-        "reg_alpha": best_params.get("reg_alpha", 0.0),
-        "reg_lambda": best_params.get("reg_lambda", 1.0),
-        "scale_pos_weight": scale_weight,
-        "objective": "binary:logistic",
-        "eval_metric": "logloss",
-        "random_state": 42,
-        "early_stopping_rounds": 50,
-    }
-    if device != "cpu":
-        model_params["device"] = device
-
-    model = xgb.XGBClassifier(**model_params)
-    model.fit(X_train_scaled, y_train,
-              eval_set=[(X_valid_scaled, valid_df["TARGET"].values)],
-              sample_weight=sample_weights,
-              verbose=False)
-
-    # Predictions
-    y_pred_valid = model.predict(X_valid_scaled)
-    y_prob_valid = model.predict_proba(X_valid_scaled)
     y_pred = model.predict(X_test_scaled)
     y_prob = model.predict_proba(X_test_scaled)
-
-    # Optimise confidence threshold on VALID (never on test)
-    best_threshold, _ = _find_best_threshold_optuna(valid_df, y_pred_valid, y_prob_valid, n_trials=40)
+    accuracy = accuracy_score(y_test, y_pred) * 100
+    prec_long = precision_score(y_test, y_pred, pos_label=1, zero_division=0) * 100
+    prec_short = precision_score(y_test, y_pred, pos_label=0, zero_division=0) * 100
 
     accuracy = accuracy_score(y_test, y_pred) * 100
     prec_long = precision_score(y_test, y_pred, pos_label=1, zero_division=0) * 100
@@ -556,9 +516,9 @@ def main():
 
     output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
     os.makedirs(output_dir, exist_ok=True)
-    date_str = datetime.now().strftime("%Y%m%d")
-    suffix = "_deep-learning" if use_deep else ""
-    output_path = os.path.join(output_dir, f"{ticker}_report_{date_str}{suffix}.html")
+    report_date = datetime.now().strftime("%Y%m%d")
+    report_suffix = "_deep-learning" if use_deep else ""
+    output_path = os.path.join(output_dir, f"{ticker}_report_{report_date}{report_suffix}.html")
     with open(output_path, "w") as f:
         f.write(html)
 
