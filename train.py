@@ -453,7 +453,7 @@ def _find_best_threshold_optuna(df_valid, y_pred_valid, y_prob_valid, n_trials=4
 
     Scoring = edge × sqrt(n_trades / 20)
       - Rewards high edge
-      - Penalises statistically thin results (< 20 trades → score scaled down)
+      - Penalises statistically thin results (< 20 trades -> score scaled down)
       - Prevents overfitting to lucky 5-trade streaks at very high thresholds
     Min 20 trades required to return a positive score.
     """
@@ -585,9 +585,9 @@ def triannual_walk_forward_test(df, feature_cols, model, scaler, min_wr=0.55, ye
     Test model on 3-year rolling blocks instead of annual slices.
 
     WHY 3-YEAR BLOCKS INSTEAD OF 1-YEAR:
-    - 1 year → ~250 trading days × 15% = ~37 test samples
+    - 1 year -> ~250 trading days × 15% = ~37 test samples
       At 37 trades, 54% vs 56% WR = literally 1 win difference = noise
-    - 3 years → ~750 trading days × 15% = ~112 test samples
+    - 3 years -> ~750 trading days × 15% = ~112 test samples
       Statistically meaningful: margin of error drops from ±8% to ±5%
 
     With 9 years of data, we get 3 non-overlapping blocks:
@@ -659,9 +659,9 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
     Train XGBoost classifier: predict LONG(1) vs SHORT(0).
 
     Split strategy (70/15/15, chronological, no leakage):
-      70% TRAIN  → Optuna walk-forward CV runs entirely within this slice
-      15% VALID  → Confidence threshold tuned here (more data = less overfit)
-      15% TEST   → Final honest backtest, completely untouched until end
+      70% TRAIN  -> Optuna walk-forward CV runs entirely within this slice
+      15% VALID  -> Confidence threshold tuned here (more data = less overfit)
+      15% TEST   -> Final honest backtest, completely untouched until end
 
     Timeout-based training:
       Runs Optuna repeatedly with different random seeds within a time budget.
@@ -683,7 +683,7 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
     if use_deep is None:
         use_deep = gpu_available  # 9-year window has enough samples for LSTM/CNN on GPU
 
-    print(f"Hardware: {device} → n_trials={n_trials}, deep_learning={'ON' if use_deep else 'OFF'} (auto)")
+    print(f"Hardware: {device} -> n_trials={n_trials}, deep_learning={'ON' if use_deep else 'OFF'} (auto)")
     print(f"Total samples: {len(df)}")
     print(f"Base features: {len(feature_cols)}")
     print(f"Strategy: timeout-based (find best WR within time budget)")
@@ -710,7 +710,7 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
         if regime_col in df.columns:
             before = len(df)
             df = df[df[regime_col] >= min_adx_pctile].reset_index(drop=True)
-            print(f"ADX regime filter (>= {min_adx_pctile:.0f}th pctile): {before} → {len(df)} samples")
+            print(f"ADX regime filter (>= {min_adx_pctile:.0f}th pctile): {before} -> {len(df)} samples")
 
     # ── Chronological split: full 9 years, last 3 months = TEST ─────────────
     # USE ALL DATA (9 years) for maximum training signal.
@@ -729,11 +729,11 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
     train_df = pre_test_df[:train_end]
     valid_df = pre_test_df[train_end:].reset_index(drop=True)
 
-    print(f"\nFull dataset: {n} samples ({df.iloc[0]['Date'][:10]} → {df.iloc[-1]['Date'][:10]})")
+    print(f"\nFull dataset: {n} samples ({df.iloc[0]['Date'][:10]} -> {df.iloc[-1]['Date'][:10]})")
     print(f"Split (9yr train+valid, last 3mo test):")
-    print(f"  Train: {len(train_df)} ({train_df.iloc[0]['Date'][:10]} → {train_df.iloc[-1]['Date'][:10]})")
-    print(f"  Valid: {len(valid_df)} ({valid_df.iloc[0]['Date'][:10]} → {valid_df.iloc[-1]['Date'][:10]})")
-    print(f"  Test:  {len(test_df)} ({test_df.iloc[0]['Date'][:10]} → {test_df.iloc[-1]['Date'][:10]}) ← live trading period")
+    print(f"  Train: {len(train_df)} ({train_df.iloc[0]['Date'][:10]} -> {train_df.iloc[-1]['Date'][:10]})")
+    print(f"  Valid: {len(valid_df)} ({valid_df.iloc[0]['Date'][:10]} -> {valid_df.iloc[-1]['Date'][:10]})")
+    print(f"  Test:  {len(test_df)} ({test_df.iloc[0]['Date'][:10]} -> {test_df.iloc[-1]['Date'][:10]}) <-live trading period")
 
     # ── Timeout-based training: run Optuna repeatedly until timeout ─────────
     # Keeps the model with the BEST test-set WR (live trading backtest).
@@ -853,7 +853,7 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
     print(f"\n{'='*50}")
     print("CONFIDENCE THRESHOLD OPTIMISATION (on Valid set)")
     print(f"{'='*50}")
-    print("Correlation table (confidence → win rate on valid):")
+    print("Correlation table (confidence -> win rate on valid):")
     print(f"  {'Threshold':>10} {'Trades':>7} {'Skip%':>7} {'Win Rate':>10} {'Edge':>8}")
     print(f"  {'─'*10} {'─'*7} {'─'*7} {'─'*10} {'─'*8}")
     for thresh in [0.50, 0.52, 0.55, 0.57, 0.60, 0.62, 0.65, 0.70, 0.75]:
@@ -889,7 +889,7 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
     for thresh in [0.50, 0.52, 0.55, 0.57, 0.60, 0.62, 0.65, 0.70, 0.75]:
         r = _backtest_at_threshold(test_df, y_pred_test, y_prob_test, thresh)
         skip_pct = r["skipped"] / len(test_df) * 100
-        marker = " ← Optuna" if thresh == best_thresh else ""
+        marker = " <-Optuna" if thresh == best_thresh else ""
         if r["total"] > 0:
             print(f"  {thresh:>10.2f} {r['total']:>7} {skip_pct:>6.1f}% {r['wr']:>9.1f}% {r['edge']:>+8.3f}R{marker}")
 
@@ -973,8 +973,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Auto-detection behaviour (when flags not specified):
-  GPU detected  →  --n-trials 300, --deep-learning ON
-  CPU only      →  --n-trials 100, --deep-learning OFF
+  GPU detected  ->  --n-trials 300, --deep-learning ON
+  CPU only      ->  --n-trials 100, --deep-learning OFF
 
 Override examples:
   python train.py --csv data/AAPL_*.csv                    # auto
