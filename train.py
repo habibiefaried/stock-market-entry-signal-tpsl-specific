@@ -462,26 +462,27 @@ def _find_best_threshold_optuna(df_valid, y_pred_valid, y_prob_valid, n_trials=4
 def purged_random_split(df, valid_frac=0.15, n_test_months=3,
                         embargo_days=5, random_state=42):
     """
-    Purged random split with FORCED RECENT TEST set.
+    Purged random split with FORCED RECENT TEST (staggered across 2 years).
 
     Strategy:
-      - TEST: ALWAYS the most recent N months (default 3). This guarantees
-        you can see how the model performs on the latest market conditions.
-      - VALID: random 15% of remaining months (for threshold tuning)
-      - TRAIN: everything else (diverse months from all years/regimes)
+      - TEST: last 3 months of THIS year + last 3 months of LAST year.
+        This ensures test covers BOTH recent data AND a different regime,
+        preventing inflated WR from one-directional trends.
+      - VALID: random 15% of remaining months (threshold tuning)
+      - TRAIN: everything else (diverse months from all years)
       - ±5 day embargo at block boundaries prevents temporal leakage
 
-    WHY FORCED RECENT TEST:
-    If test months are randomly scattered, you might never test on 2026 data.
-    For live trading you NEED to know the model works NOW. Forcing the last
-    3 months into test guarantees this — if it fails on recent data, you know
-    not to trade it regardless of historical performance.
+    WHY STAGGERED TEST (5 time periods):
+    If test is only from one period (e.g. Apr-Jun 2026 = strong bull),
+    naive "always LONG" beats the model. Staggering across 5 different
+    time periods (this year, last year, 2/3/4 years ago) ensures the
+    test set naturally balances bullish/bearish/sideways conditions.
+    Total: ~9 months from 5 distinct market environments.
 
     WHY RANDOM TRAIN/VALID:
     XGBoost doesn't care about data order — each row is independent with all
     temporal context encoded in lag features. Random assignment ensures training
-    sees ALL regimes (bull, bear, crash, recovery) and isn't biased toward
-    only old data. Validation also covers diverse conditions for threshold tuning.
+    sees ALL regimes and isn't biased toward only old data.
 
     Returns: (train_df, valid_df, test_df) — each reset_index'd.
     """
@@ -496,9 +497,31 @@ def purged_random_split(df, valid_frac=0.15, n_test_months=3,
     months = sorted(month_dict.keys())
     n_months = len(months)
 
-    # TEST: always the most recent N months (forced)
-    test_months = months[-n_test_months:]
-    remaining_months = months[:-n_test_months]
+    # TEST: staggered across 5 time periods for regime diversity
+    # - 3 months from this year (most recent — "does model work NOW?")
+    # - 3 months from last year (different regime)
+    # - 1 month from each of 3 prior years (historical regime coverage)
+    # Total: ~9 months of test data across 5 different time periods
+    test_months_set = set()
+
+    # Most recent 3 months
+    for m in months[-n_test_months:]:
+        test_months_set.add(m)
+
+    # 3 months from ~1 year ago
+    offset_1yr = n_test_months + 12
+    if n_months > offset_1yr:
+        for m in months[-(offset_1yr):-(offset_1yr - n_test_months)]:
+            test_months_set.add(m)
+
+    # 1 month from each of 3 prior years (~2, 3, 4 years ago)
+    for years_back in [24, 36, 48]:
+        offset = n_test_months + years_back
+        if n_months > offset:
+            test_months_set.add(months[-(offset)])
+
+    test_months = sorted(test_months_set)
+    remaining_months = [m for m in months if m not in test_months_set]
 
     # VALID: random selection from remaining months
     n_valid_months = max(1, int(len(remaining_months) * valid_frac / (1 - n_test_months / n_months)))

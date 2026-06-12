@@ -116,12 +116,20 @@ XGBoost treats each row independently — it doesn't care about order. Each row 
 - Buffer at month boundaries removes this leakage
 - Based on Marcos Lopez de Prado's "Advances in Financial Machine Learning"
 
-**AAPL result (50 trials):**
+**Test window: ~9 months staggered across 5 time periods:**
+- 3 months from this year (most recent — answers "does model work NOW?")
+- 3 months from last year (different regime)
+- 1 month from each of 3 prior years (2, 3, 4 years ago)
+
+WHY NOT just 3 recent months: if Apr–Jun 2026 is all bullish, naive "always LONG" = 81% WR — any model looks good. Staggering across 5 periods ensures bull, bear, and sideways are all represented → honest WR that can't be gamed by regime luck.
+
+**Example output:**
 ```
-Train: 1095 (random months from all years)
-Valid: 188 (random months)
-Test:  38 (Apr–Jun 2026, most recent)
-WR on test: 68.4% | Edge: +0.711R | 3/3 triannual blocks passed 55%
+Split (random train/valid + forced recent test, embargo ±5 days):
+  Train: 988 (random months from all years)
+  Valid: 196 (random months, for threshold tuning)
+  Test:  127 (staggered: 2022-04 → 2026-06, from 5 distinct periods)
+  Embargo: 135 samples purged (9.3%)
 ```
 
 **Triannual walk-forward validation gate:**
