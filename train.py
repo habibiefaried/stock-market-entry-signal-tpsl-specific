@@ -302,7 +302,7 @@ def generate_deep_features(df, feature_cols, seq_len=15, epochs=20, lr=0.001):
 # ──────────────────────────────────────────────
 
 def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1, trial=None):
-    """Walk-forward CV with XGBoostPruningCallback for per-tree step-level pruning."""
+    """Walk-forward CV — reports intermediate fold scores for MedianPruner."""
     n = len(df)
     test_len = int(n * test_size)
     min_train = int(n * 0.4)
@@ -329,7 +329,6 @@ def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1, trial=N
         n_short = len(y_train) - n_long
         sw = n_short / n_long if n_long > 0 else 1.0
 
-        callbacks = [XGBoostPruningCallback(trial, "validation_0-logloss")] if trial else None
         model = xgb.XGBClassifier(
             **params,
             scale_pos_weight=sw,
@@ -337,7 +336,6 @@ def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1, trial=N
             eval_metric="logloss",
             random_state=42,
             early_stopping_rounds=30,
-            callbacks=callbacks,
         )
         model.fit(X_train_s, y_train, eval_set=[(X_test_s, test_df["TARGET"].values)],
                   verbose=False)
@@ -359,14 +357,14 @@ def walk_forward_cv(df, feature_cols, params, n_splits=5, test_size=0.1, trial=N
 
 
 def optimize_hyperparams(df, feature_cols, n_trials=100):
-    """Optuna Bayesian optimization: two-level pruning (XGBoostPruningCallback + MedianPruner)."""
-    print(f"Running Optuna optimization ({n_trials} trials, with XGBoostPruningCallback)...")
+    """Optuna Bayesian optimization with MedianPruner (fold-level pruning only)."""
+    print(f"Running Optuna optimization ({n_trials} trials)...")
 
     def objective(trial):
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 2000, 30000),
-            "learning_rate": trial.suggest_float("learning_rate", 0.0001, 0.5, log=True),
-            "max_depth": trial.suggest_int("max_depth", 3, 8),
+            "n_estimators": trial.suggest_int("n_estimators", 500, 5000),
+            "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
+            "max_depth": trial.suggest_int("max_depth", 3, 10),
             "subsample": trial.suggest_float("subsample", 0.6, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
             "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
