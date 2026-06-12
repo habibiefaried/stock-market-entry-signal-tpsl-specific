@@ -83,10 +83,23 @@ Given today's market conditions, should I enter LONG or SHORT to maximize my cha
   - SHORT: did price go DOWN to hit -1.5×ATR before going UP to hit +1×ATR?
 - Outputs clean CSV with zero NaN values
 
+### Data Split — Zero Leakage
+
+```
+Full dataset (chronological)
+├── 80% TRAIN   → Optuna walk-forward CV runs entirely here
+├── 10% VALID   → Confidence threshold optimised here (Optuna, 40 trials)
+└── 10% TEST    → Honest backtest — completely untouched until the very end
+```
+
+The test set is **never used** during training or threshold tuning. This prevents the common mistake of optimising on test data and reporting inflated results.
+
 ### The Model (train.py)
 - XGBoost binary classifier: predicts LONG (1) vs SHORT (0)
 - Only uses scale-invariant features (no absolute prices that change over time)
-- **Binary prediction with noise filtering**: LONG (1) or SHORT (0). Drops samples where both directions hit SL (choppy noise). Use confidence threshold at inference to skip uncertain signals.
+- **Binary prediction with noise filtering**: LONG (1) or SHORT (0). Drops samples where both directions hit SL (choppy noise).
+- **Optuna-tuned confidence threshold**: The decision threshold (default 0.50) is optimised on the validation set using Optuna to maximise edge. Saved to `models/{TICKER}_{date}_xgboost_threshold.txt`. Used automatically by `current.py`.
+- **Trader-style backtest**: Simulates a real trader — only enters trades where confidence ≥ threshold. Reports full correlation table showing how win rate changes at each confidence level.
 - **Market regime features**: ATR percentile, return percentile, volatility regime, trend strength regime (all 0-100 scale, tells model "what kind of market is this?")
 - **Normalized features**: MACD_Hist/ATR, log-volume changes, CCI/KST clipped to bounded ranges — prevents scale drift over time
 - **Interaction features**: 14 pre-computed pattern combinations (e.g., RSI_oversold + Bullish_Engulfing, BB_Squeeze + above SMA) — gives XGBoost direct access to multi-indicator signals
@@ -131,6 +144,39 @@ python train_xgboost_cnn_lstm_experimental.py --csv data/AAPL_tpsl_data_YYYYMMDD
 
 # Use in report (instead of standard XGBoost)
 python generate_report.py --csv data/AAPL_tpsl_data_YYYYMMDD.csv --deep-experimental
+```
+
+#### Confidence Threshold — How It Works
+
+The threshold is the minimum confidence required to enter a trade. Instead of guessing (e.g., always use 60%), we let Optuna find the sweet spot on the validation set:
+
+```
+Optuna searches threshold from 0.45 → 0.80
+For each candidate threshold:
+  → Simulate trading on validation set (skip any trade below threshold)
+  → Measure edge = WinRate × 1.5R - LossRate × 1.0R
+  → Score = edge (higher is better)
+Best threshold saved to models/{ticker}_threshold.txt
+```
+
+**Example output — AAPL:**
+```
+Correlation table on TEST set:
+  Threshold  Trades   Skip%  Win Rate     Edge
+  ─────────  ──────  ──────  ────────  ───────
+       0.50     145    0.0%     53.8%  +0.345R   ← trade everything
+       0.52     108   25.5%     58.3%  +0.458R
+       0.55      58   60.0%     55.2%  +0.379R
+       0.60      13   91.0%     61.5%  +0.538R
+       0.62       5   96.6%     60.0%  +0.500R   ← Optuna-tuned
+```
+
+Trade-off: higher threshold → fewer trades but higher win rate. The Optuna threshold maximises **edge** (quality × quantity), not just win rate.
+
+`current.py` loads the saved threshold and shows whether today's signal is above it:
+```
+VERDICT:    ▼ SHORT
+Confidence: 51.4%  →  ✘ SKIP (below threshold 0.62)
 ```
 
 #### How Confidence Is Calculated

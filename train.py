@@ -405,10 +405,57 @@ def detect_gpu():
 # MAIN: Train + evaluate + save
 # ──────────────────────────────────────────────
 
-def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100,
+def _backtest_at_threshold(df_set, y_pred, y_prob, threshold):
+    """Run trader-style backtest: only enter trades where confidence >= threshold."""
+    correct = skipped = total = 0
+    cumulative_r = 0.0
+    equity_curve = []
+    for idx, (_, row) in enumerate(df_set.iterrows()):
+        conf = float(np.max(y_prob[idx]))
+        if conf < threshold:
+            skipped += 1
+            continue
+        total += 1
+        won = (y_pred[idx] == 1 and row["VERDICT_LONG"] == "TP") or \
+              (y_pred[idx] == 0 and row["VERDICT_SHORT"] == "TP")
+        if won:
+            correct += 1
+            cumulative_r += 1.5
+        else:
+            cumulative_r -= 1.0
+        equity_curve.append(cumulative_r)
+    wr = correct / total * 100 if total > 0 else 0.0
+    edge = wr / 100 * 1.5 - (1 - wr / 100) * 1.0 if total > 0 else 0.0
+    return {"total": total, "wins": correct, "wr": wr, "edge": edge,
+            "skipped": skipped, "final_r": cumulative_r, "equity": equity_curve}
+
+
+def _find_best_threshold_optuna(df_valid, y_pred_valid, y_prob_valid, n_trials=30):
+    """
+    Use Optuna to find the confidence threshold that maximises edge on validation set.
+    Searches 0.45–0.80. Uses validation set (never the test set).
+    """
+    def objective(trial):
+        thresh = trial.suggest_float("threshold", 0.45, 0.80)
+        result = _backtest_at_threshold(df_valid, y_pred_valid, y_prob_valid, thresh)
+        if result["total"] < 10:
+            return 0.0  # not enough trades to be meaningful
+        return result["edge"]
+
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    return round(study.best_params["threshold"], 2), study.best_value
+
+
+def train_model(csv_path: str, train_ratio: float = 0.8, n_trials: int = 100,
                 use_deep: bool = False, min_adx_pctile: float = 0.0):
     """
     Train XGBoost classifier: predict LONG(1) vs SHORT(0).
+
+    Data split (chronological, strictly no leakage):
+      80% TRAIN   → Optuna walk-forward CV runs entirely within this slice
+      10% VALID   → Confidence threshold tuned here (separate from Optuna)
+      10% TEST    → Final honest backtest, completely untouched until end
 
     use_deep:         Add 4 LSTM+CNN deep features (requires PyTorch + GPU recommended)
     min_adx_pctile:   0=all data (default), 50=top-half ADX trending only
@@ -445,29 +492,38 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100,
             df = df[df[regime_col] >= min_adx_pctile].reset_index(drop=True)
             print(f"ADX regime filter (>= {min_adx_pctile:.0f}th pctile): {before} → {len(df)} samples ({(before-len(df))/before*100:.1f}% filtered)")
 
-    # Optuna tuning
+    # ── 3-way chronological split ────────────────────────────────────────
+    n = len(df)
+    train_end = int(n * 0.80)
+    valid_end = int(n * 0.90)
+
+    train_df = df[:train_end]
+    valid_df = df[train_end:valid_end].reset_index(drop=True)
+    test_df  = df[valid_end:].reset_index(drop=True)
+    print(f"\nSplit: Train={len(train_df)} | Valid={len(valid_df)} | Test={len(test_df)}")
+    print(f"  Train: {train_df.iloc[0]['Date'][:10]} → {train_df.iloc[-1]['Date'][:10]}")
+    print(f"  Valid: {valid_df.iloc[0]['Date'][:10]} → {valid_df.iloc[-1]['Date'][:10]}")
+    print(f"  Test:  {test_df.iloc[0]['Date'][:10]} → {test_df.iloc[-1]['Date'][:10]}")
+
+    # Optuna only sees the TRAIN slice (80%)
     optuna_start = time.time()
-    best_params = optimize_hyperparams(df, feature_cols, n_trials)
+    best_params = optimize_hyperparams(train_df, feature_cols, n_trials)
     optuna_time = time.time() - optuna_start
     print(f"Optuna time: {optuna_time:.1f}s")
     n_estimators = best_params.pop("n_estimators")
     learning_rate = best_params.pop("learning_rate")
     max_depth = best_params.pop("max_depth")
 
-    # Chronological split
-    split_idx = int(len(df) * train_ratio)
-    train_df = df[:split_idx]
-    test_df = df[split_idx:]
-    print(f"\nTrain: {len(train_df)} | Test: {len(test_df)}")
-
     X_train = train_df[feature_cols].values
     y_train = train_df["TARGET"].values
-    X_test = test_df[feature_cols].values
-    y_test = test_df["TARGET"].values
+    X_valid = valid_df[feature_cols].values
+    X_test  = test_df[feature_cols].values
+    y_test  = test_df["TARGET"].values
 
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
+    X_valid_scaled = scaler.transform(X_valid)
+    X_test_scaled  = scaler.transform(X_test)
 
     n_long = y_train.sum()
     n_short = len(y_train) - n_long
@@ -495,84 +551,89 @@ def train_model(csv_path: str, train_ratio: float = 0.9, n_trials: int = 100,
     print(f"\nModel params: depth={max_depth}, lr={learning_rate:.4f}, trees={n_estimators}, device={device}")
     train_start = time.time()
     model = xgb.XGBClassifier(**model_params)
-    model.fit(X_train_scaled, y_train, eval_set=[(X_test_scaled, y_test)], verbose=False)
+    # Use VALID set for early stopping (not TEST — that stays locked)
+    model.fit(X_train_scaled, y_train, eval_set=[(X_valid_scaled, valid_df["TARGET"].values)], verbose=False)
     train_time = time.time() - train_start
     print(f"Final model training time: {train_time:.1f}s")
 
-    # Evaluate
-    y_pred = model.predict(X_test_scaled)
-    y_prob = model.predict_proba(X_test_scaled)
+    # Predictions on valid + test
+    y_pred_valid = model.predict(X_valid_scaled)
+    y_prob_valid = model.predict_proba(X_valid_scaled)
+    y_pred_test  = model.predict(X_test_scaled)
+    y_prob_test  = model.predict_proba(X_test_scaled)
 
-    print(f"\n{'='*50}")
-    print("TEST SET RESULTS")
-    print(f"{'='*50}")
-    print(f"Accuracy: {accuracy_score(y_test, y_pred)*100:.1f}%")
-    print(f"\nClassification Report:")
-    print(classification_report(y_test, y_pred, target_names=["SHORT", "LONG"]))
-
+    # Feature importance
     importance = model.feature_importances_
     feat_imp = sorted(zip(feature_cols, importance), key=lambda x: x[1], reverse=True)
     print(f"\nTop 20 Features:")
     for fname, imp in feat_imp[:20]:
         print(f"  {fname:30s} {imp:.4f}")
 
-    # Backtest
+    # ── Confidence threshold optimisation on VALID set ───────────────────
     print(f"\n{'='*50}")
-    print("BACKTEST ON TEST SET")
+    print("CONFIDENCE THRESHOLD OPTIMISATION (on Valid set)")
     print(f"{'='*50}")
-    correct_tp = sum(
-        1 for idx, (_, row) in enumerate(test_df.iterrows())
-        if (y_pred[idx] == 1 and row["VERDICT_LONG"] == "TP") or
-           (y_pred[idx] == 0 and row["VERDICT_SHORT"] == "TP")
-    )
-    total_trades = len(test_df)
-    win_rate = correct_tp / total_trades * 100
-    edge = win_rate / 100 * 1.5 - (1 - win_rate / 100) * 1.0
-    print(f"Trades: {total_trades}")
-    print(f"Wins (TP hit): {correct_tp}")
-    print(f"Losses (SL hit): {total_trades - correct_tp}")
-    print(f"Win Rate: {win_rate:.1f}%")
-    print(f"Expected Edge: {edge:+.3f}R per trade")
+    print("Correlation table (confidence → win rate on valid):")
+    print(f"  {'Threshold':>10} {'Trades':>7} {'Skip%':>7} {'Win Rate':>10} {'Edge':>8}")
+    print(f"  {'─'*10} {'─'*7} {'─'*7} {'─'*10} {'─'*8}")
+    for thresh in [0.50, 0.52, 0.55, 0.57, 0.60, 0.62, 0.65, 0.70, 0.75]:
+        r = _backtest_at_threshold(valid_df, y_pred_valid, y_prob_valid, thresh)
+        skip_pct = r["skipped"] / len(valid_df) * 100
+        if r["total"] > 0:
+            print(f"  {thresh:>10.2f} {r['total']:>7} {skip_pct:>6.1f}% {r['wr']:>9.1f}% {r['edge']:>+8.3f}R")
 
-    # Confidence analysis
+    best_thresh, best_valid_edge = _find_best_threshold_optuna(
+        valid_df, y_pred_valid, y_prob_valid, n_trials=40)
+    print(f"\nOptuna best threshold: {best_thresh:.2f}  (valid edge: {best_valid_edge:+.3f}R)")
+
+    # ── Final honest backtest on TEST set ────────────────────────────────
     print(f"\n{'='*50}")
-    print("CONFIDENCE ANALYSIS")
+    print("TRADER BACKTEST — TEST SET (never seen during training or tuning)")
     print(f"{'='*50}")
-    confidences = np.max(y_prob, axis=1)
-    for threshold in [0.50, 0.55, 0.60, 0.65, 0.70]:
-        mask = confidences >= threshold
-        if mask.sum() == 0:
-            continue
-        filtered_correct = sum(
-            1 for idx, (_, row) in enumerate(test_df.iterrows())
-            if mask[idx] and (
-                (y_pred[idx] == 1 and row["VERDICT_LONG"] == "TP") or
-                (y_pred[idx] == 0 and row["VERDICT_SHORT"] == "TP")
-            )
-        )
-        filtered_total = int(mask.sum())
-        if filtered_total > 0:
-            fwr = filtered_correct / filtered_total * 100
-            fe = fwr / 100 * 1.5 - (1 - fwr / 100) * 1.0
-            print(f"  Confidence >= {threshold*100:.0f}%: {filtered_total} trades, Win Rate: {fwr:.1f}%, Edge: {fe:+.3f}R")
 
-    # Save model artifacts — suffix _deep if deep learning was used
+    # All trades (no filter) — baseline
+    raw = _backtest_at_threshold(test_df, y_pred_test, y_prob_test, 0.0)
+    print(f"\n[All trades, no filter]")
+    print(f"  Trades: {raw['total']} | Win Rate: {raw['wr']:.1f}% | Edge: {raw['edge']:+.3f}R | Final: {raw['final_r']:+.1f}R")
+
+    # Optimized threshold from valid set
+    opt = _backtest_at_threshold(test_df, y_pred_test, y_prob_test, best_thresh)
+    skip_pct = opt["skipped"] / len(test_df) * 100
+    print(f"\n[Confidence >= {best_thresh:.2f} (Optuna-tuned threshold)]")
+    print(f"  Trades: {opt['total']} | Skipped: {opt['skipped']} ({skip_pct:.1f}%) | Win Rate: {opt['wr']:.1f}% | Edge: {opt['edge']:+.3f}R | Final: {opt['final_r']:+.1f}R")
+
+    # Show full threshold correlation on test too
+    print(f"\nCorrelation table on TEST set:")
+    print(f"  {'Threshold':>10} {'Trades':>7} {'Skip%':>7} {'Win Rate':>10} {'Edge':>8}")
+    print(f"  {'─'*10} {'─'*7} {'─'*7} {'─'*10} {'─'*8}")
+    for thresh in [0.50, 0.52, 0.55, 0.57, 0.60, 0.62, 0.65, 0.70, 0.75]:
+        r = _backtest_at_threshold(test_df, y_pred_test, y_prob_test, thresh)
+        skip_pct = r["skipped"] / len(test_df) * 100
+        marker = " ← Optuna" if thresh == best_thresh else ""
+        if r["total"] > 0:
+            print(f"  {thresh:>10.2f} {r['total']:>7} {skip_pct:>6.1f}% {r['wr']:>9.1f}% {r['edge']:>+8.3f}R{marker}")
+
+    # Save model artifacts
     ticker = os.path.basename(csv_path).split("_")[0]
     date_str = datetime.now().strftime("%Y%m%d")
     model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
     os.makedirs(model_dir, exist_ok=True)
     suffix = "_deep" if use_deep else ""
 
-    model_path = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_model.json")
-    scaler_path = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_scaler.pkl")
-    features_path = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_features.txt")
+    model_path     = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_model.json")
+    scaler_path    = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_scaler.pkl")
+    features_path  = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_features.txt")
+    threshold_path = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_threshold.txt")
 
     model.save_model(model_path)
     joblib.dump(scaler, scaler_path)
     with open(features_path, "w") as f:
         f.write("\n".join(feature_cols))
+    with open(threshold_path, "w") as f:
+        f.write(str(best_thresh))
 
-    print(f"\nModel saved to: {model_path}")
+    print(f"\nModel saved to:     {model_path}")
+    print(f"Threshold saved to: {threshold_path}  (value: {best_thresh:.2f})")
 
     # Latest candle prediction
     print(f"\n{'='*50}")

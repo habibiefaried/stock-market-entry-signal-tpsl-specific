@@ -35,17 +35,23 @@ def find_latest_model(ticker: str, model_dir: str, deep: bool = False):
     pattern = os.path.join(model_dir, f"{ticker}_*_xgboost{suffix}_model.json")
     models = sorted(glob.glob(pattern), reverse=True)
     if not models:
-        return None, None, None
+        return None, None, None, None
 
     model_path = models[0]
     prefix = model_path.replace("_model.json", "")
-    scaler_path = prefix + "_scaler.pkl"
-    features_path = prefix + "_features.txt"
+    scaler_path    = prefix + "_scaler.pkl"
+    features_path  = prefix + "_features.txt"
+    threshold_path = prefix + "_threshold.txt"
 
     if not os.path.exists(scaler_path) or not os.path.exists(features_path):
-        return None, None, None
+        return None, None, None, None
 
-    return model_path, scaler_path, features_path
+    threshold = 0.50  # fallback default
+    if os.path.exists(threshold_path):
+        with open(threshold_path) as f:
+            threshold = float(f.read().strip())
+
+    return model_path, scaler_path, features_path, threshold
 
 
 def get_prepared_data(ticker: str):
@@ -100,7 +106,7 @@ def main():
     model_dir = os.path.join(base_dir, "models")
 
     # Find model
-    model_path, scaler_path, features_path = find_latest_model(args.ticker, model_dir, args.deep)
+    model_path, scaler_path, features_path, best_threshold = find_latest_model(args.ticker, model_dir, args.deep)
     if model_path is None:
         model_type = "deep" if args.deep else "standard"
         print(f"ERROR: No trained {model_type} model found for {args.ticker}")
@@ -149,6 +155,7 @@ def main():
 
     direction = "LONG" if pred == 1 else "SHORT"
     confidence = prob[pred] * 100
+    tradeable = confidence >= best_threshold * 100
 
     # Calculate TP/SL based on CURRENT PRICE (not last close)
     if direction == "LONG":
@@ -163,9 +170,11 @@ def main():
 
     # Output
     direction_symbol = "▲" if direction == "LONG" else "▼"
+    trade_signal = "✔ TRADE" if tradeable else f"✘ SKIP (below threshold {best_threshold:.2f})"
     print(f"\n{'─'*60}")
-    print(f"  VERDICT: {direction_symbol} {direction}")
-    print(f"  Confidence: {confidence:.1f}%")
+    print(f"  VERDICT:    {direction_symbol} {direction}")
+    print(f"  Confidence: {confidence:.1f}%  →  {trade_signal}")
+    print(f"  Threshold:  {best_threshold*100:.0f}% (Optuna-tuned on validation set)")
     print(f"  P(LONG): {prob[1]*100:.1f}%  |  P(SHORT): {prob[0]*100:.1f}%")
     print(f"{'─'*60}")
     print(f"\n  Entry Price:  ${args.price:.2f}")
