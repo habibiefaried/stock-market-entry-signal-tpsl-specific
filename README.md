@@ -302,7 +302,7 @@ Each trial trains XGBoost with a different combination of parameters and scores 
 |-----------|-------------|-----------------|
 | `n_estimators` | 2000 – 30000 | Number of trees |
 | `learning_rate` | 0.0001 – 0.5 | How much each tree contributes |
-| `max_depth` | 3 – 10 | Complexity of each tree |
+| `max_depth` | 3 – 8 | Complexity of each tree |
 | `subsample` | 0.6 – 1.0 | Fraction of rows each tree sees |
 | `colsample_bytree` | 0.5 – 1.0 | Fraction of features each tree sees |
 | `min_child_weight` | 1 – 10 | Min samples required to split a node |
