@@ -466,20 +466,86 @@ def _find_best_threshold_optuna(df_valid, y_pred_valid, y_prob_valid, n_trials=4
     return round(study.best_params["threshold"], 2), study.best_value
 
 
-def train_model(csv_path: str, train_ratio: float = 0.8, n_trials: int = None,
+def annual_walk_forward_test(df, feature_cols, model, scaler, min_wr=0.55, n_recent_years=3):
+    """
+    Test model across the most recent N annual slices independently.
+    Each year: 70% of that year's data trains, 15% validates, 15% tests.
+
+    WHY THIS MATTERS:
+    A global 70/15/15 split trains on 2017-2023 and tests on 2025/2026.
+    But AAPL in 2019 behaves differently from AAPL in 2025 (different
+    market regime, volatility, sector rotation). Annual testing ensures
+    the model works consistently across different market environments,
+    not just one lucky period.
+
+    Returns: list of annual results, and whether model passes the WR gate.
+    """
+    dates = pd.to_datetime(df["Date"])
+    years = sorted(dates.dt.year.unique())
+    recent_years = years[-n_recent_years:]
+
+    annual_results = []
+    for year in recent_years:
+        year_mask = dates.dt.year == year
+        year_df = df[year_mask].reset_index(drop=True)
+        if len(year_df) < 60:
+            continue
+
+        ny = len(year_df)
+        # 70/15/15 within each year
+        test_start  = int(ny * 0.85)
+        valid_start = int(ny * 0.70)
+
+        test_y = year_df[test_start:].reset_index(drop=True)
+        if len(test_y) < 15:
+            continue
+
+        X_test = scaler.transform(test_y[feature_cols].values)
+        y_pred = model.predict(X_test)
+        y_prob = model.predict_proba(X_test)
+
+        correct = sum(
+            1 for idx, (_, row) in enumerate(test_y.iterrows())
+            if (y_pred[idx] == 1 and row["VERDICT_LONG"] == "TP") or
+               (y_pred[idx] == 0 and row["VERDICT_SHORT"] == "TP")
+        )
+        wr = correct / len(test_y) * 100
+        edge = wr / 100 * 1.5 - (1 - wr / 100) * 1.0
+        annual_results.append({
+            "year": year,
+            "trades": len(test_y),
+            "wr": wr,
+            "edge": edge,
+            "pass": wr >= min_wr * 100,
+        })
+
+    years_passing = sum(1 for r in annual_results if r["pass"])
+    # Model passes if majority of recent years meet the WR threshold
+    passes_gate = years_passing >= len(annual_results) // 2 + 1 if annual_results else False
+    return annual_results, passes_gate
+
+
+def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
                 use_deep: bool = None, min_adx_pctile: float = 0.0,
-                force_save: bool = False):
+                force_save: bool = False, min_wr: float = 0.55):
     """
     Train XGBoost classifier: predict LONG(1) vs SHORT(0).
 
-    Data split (chronological, strictly no leakage):
-      80% TRAIN   → Optuna walk-forward CV runs entirely within this slice
-      10% VALID   → Confidence threshold tuned here (separate from Optuna)
-      10% TEST    → Final honest backtest, completely untouched until end
+    Split strategy (70/15/15, chronological, no leakage):
+      70% TRAIN  → Optuna walk-forward CV runs entirely within this slice
+      15% VALID  → Confidence threshold tuned here (more data = less overfit)
+      15% TEST   → Final honest backtest, completely untouched until end
 
-    n_trials:     None = auto (300 if GPU detected, 100 if CPU)
-    use_deep:     None = auto (True if GPU detected, False if CPU)
-    min_adx_pctile: 0=all data (default), 50=top-half ADX trending only
+    Annual walk-forward gate:
+      After training, tests the model independently on each of the last
+      3 calendar years. Model is only saved if it achieves min_wr (55%)
+      in the majority of those years. This ensures the model generalises
+      across market regimes, not just one lucky period.
+
+    n_trials:   None = auto (250 GPU, 100 CPU)
+    use_deep:   None = auto (True GPU, False CPU)
+    min_wr:     Minimum win rate required to save model (default 0.55 = 55%)
+    force_save: Bypass min_wr gate and always save
     """
     total_start = time.time()
     df, feature_cols = load_and_prepare(csv_path)
@@ -493,10 +559,9 @@ def train_model(csv_path: str, train_ratio: float = 0.8, n_trials: int = None,
         use_deep = gpu_available
 
     print(f"Hardware: {device} → n_trials={n_trials}, deep_learning={'ON' if use_deep else 'OFF'} (auto)")
-
     print(f"Total samples: {len(df)}")
     print(f"Base features: {len(feature_cols)}")
-    print(f"Device: {device}")
+    print(f"Min WR gate: {min_wr*100:.0f}% (must pass majority of last 3 years)")
 
     # Optional: deep features
     deep_time = 0
@@ -520,17 +585,17 @@ def train_model(csv_path: str, train_ratio: float = 0.8, n_trials: int = None,
         if regime_col in df.columns:
             before = len(df)
             df = df[df[regime_col] >= min_adx_pctile].reset_index(drop=True)
-            print(f"ADX regime filter (>= {min_adx_pctile:.0f}th pctile): {before} → {len(df)} samples ({(before-len(df))/before*100:.1f}% filtered)")
+            print(f"ADX regime filter (>= {min_adx_pctile:.0f}th pctile): {before} → {len(df)} samples")
 
-    # ── 3-way chronological split ────────────────────────────────────────
+    # ── 70/15/15 chronological split ─────────────────────────────────────
     n = len(df)
-    train_end = int(n * 0.80)
-    valid_end = int(n * 0.90)
+    train_end = int(n * 0.70)
+    valid_end = int(n * 0.85)   # 70% + 15% = 85%
 
     train_df = df[:train_end]
     valid_df = df[train_end:valid_end].reset_index(drop=True)
     test_df  = df[valid_end:].reset_index(drop=True)
-    print(f"\nSplit: Train={len(train_df)} | Valid={len(valid_df)} | Test={len(test_df)}")
+    print(f"\nSplit (70/15/15): Train={len(train_df)} | Valid={len(valid_df)} | Test={len(test_df)}")
     print(f"  Train: {train_df.iloc[0]['Date'][:10]} → {train_df.iloc[-1]['Date'][:10]}")
     print(f"  Valid: {valid_df.iloc[0]['Date'][:10]} → {valid_df.iloc[-1]['Date'][:10]}")
     print(f"  Test:  {test_df.iloc[0]['Date'][:10]} → {test_df.iloc[-1]['Date'][:10]}")
@@ -659,7 +724,22 @@ def train_model(csv_path: str, train_ratio: float = 0.8, n_trials: int = None,
         if r["total"] > 0:
             print(f"  {thresh:>10.2f} {r['total']:>7} {skip_pct:>6.1f}% {r['wr']:>9.1f}% {r['edge']:>+8.3f}R{marker}")
 
-    # ── Save model — only overwrite if this run is better than existing ──
+    # ── Annual walk-forward gate: test on each of last 3 years separately ──
+    print(f"\n{'='*50}")
+    print(f"ANNUAL WALK-FORWARD VALIDATION (last 3 years)")
+    print(f"{'='*50}")
+    print(f"Min WR required: {min_wr*100:.0f}% | Must pass majority of years")
+    annual_results, passes_gate = annual_walk_forward_test(
+        df, feature_cols, model, scaler, min_wr=min_wr, n_recent_years=3)
+
+    for r in annual_results:
+        status = "✔ PASS" if r["pass"] else "✘ FAIL"
+        print(f"  {r['year']}: {r['trades']:3d} trades | WR={r['wr']:.1f}% | Edge={r['edge']:+.3f}R  {status}")
+
+    years_passing = sum(1 for r in annual_results if r["pass"])
+    print(f"\nResult: {years_passing}/{len(annual_results)} years passed {min_wr*100:.0f}% WR gate")
+
+    # ── Save model — only if WR gate passed AND new run beats existing ────
     ticker = os.path.basename(csv_path).split("_")[0]
     date_str = datetime.now().strftime("%Y%m%d")
     model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
@@ -672,7 +752,7 @@ def train_model(csv_path: str, train_ratio: float = 0.8, n_trials: int = None,
     threshold_path = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_threshold.txt")
     perf_path      = os.path.join(model_dir, f"{ticker}_{date_str}_xgboost{suffix}_perf.txt")
 
-    # Score = edge at optimised threshold (higher = better)
+    # Score = edge at Optuna threshold on global test set
     new_score = opt["edge"]
     existing_score = -999.0
     if os.path.exists(perf_path):
@@ -682,7 +762,11 @@ def train_model(csv_path: str, train_ratio: float = 0.8, n_trials: int = None,
         except (ValueError, IOError):
             pass
 
-    if force_save or new_score > existing_score:
+    if not force_save and not passes_gate:
+        avg_wr = np.mean([r["wr"] for r in annual_results]) if annual_results else 0
+        print(f"\n✘ MODEL REJECTED — average annual WR {avg_wr:.1f}% < {min_wr*100:.0f}% required")
+        print(f"  Not saving. Run again with more trials, or use --force-save to override.")
+    elif force_save or new_score > existing_score:
         model.save_model(model_path)
         joblib.dump(scaler, scaler_path)
         with open(features_path, "w") as f:
@@ -691,12 +775,13 @@ def train_model(csv_path: str, train_ratio: float = 0.8, n_trials: int = None,
             f.write(str(best_thresh))
         with open(perf_path, "w") as f:
             f.write(str(new_score))
-        print(f"\nNew best model saved (edge {new_score:+.3f}R > previous {existing_score:+.3f}R)")
+        save_reason = "(force)" if force_save else f"(edge {new_score:+.3f}R > previous {existing_score:+.3f}R)"
+        print(f"\n✔ MODEL SAVED {save_reason}")
         print(f"  Model:     {model_path}")
-        print(f"  Threshold: {threshold_path}  (value: {best_thresh:.2f})")
+        print(f"  Threshold: {best_thresh:.2f}")
     else:
         print(f"\nExisting model is better (edge {existing_score:+.3f}R >= new {new_score:+.3f}R) — not overwriting")
-        print(f"  Run again or use --force-save to overwrite anyway")
+        print(f"  Use --force-save to override")
 
     # Latest candle prediction
     print(f"\n{'='*50}")
@@ -754,6 +839,8 @@ Override examples:
                         help="Only train on trending regimes: 0=all (default), 50=top half ADX")
     parser.add_argument("--force-save", action="store_true",
                         help="Overwrite saved model even if new run scores lower")
+    parser.add_argument("--min-wr", type=float, default=0.55,
+                        help="Minimum win rate required to save model (default 0.55 = 55%%)")
     args = parser.parse_args()
 
     if not os.path.exists(args.csv):
@@ -769,8 +856,8 @@ Override examples:
     else:
         use_deep = None  # auto
 
-    train_model(args.csv, 0.8, args.n_trials, use_deep, args.min_adx_pctile,
-                force_save=args.force_save)
+    train_model(args.csv, 0.7, args.n_trials, use_deep, args.min_adx_pctile,
+                force_save=args.force_save, min_wr=args.min_wr)
 
 
 if __name__ == "__main__":

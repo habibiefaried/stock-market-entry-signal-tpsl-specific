@@ -88,16 +88,49 @@ Given today's market conditions, should I enter LONG or SHORT to maximize my cha
   - SHORT: did price go DOWN to hit -1.5×ATR before going UP to hit +1×ATR?
 - Outputs clean CSV with zero NaN values
 
-### Data Split — Zero Leakage
+### Data Split Strategy — 70/15/15 with Annual Walk-Forward Gate
 
 ```
-Full dataset (chronological)
-├── 80% TRAIN   → Optuna walk-forward CV runs entirely here
-├── 10% VALID   → Confidence threshold optimised here (Optuna, 40 trials)
-└── 10% TEST    → Honest backtest — completely untouched until the very end
+Full dataset (chronological, e.g. 9 years)
+├── 70% TRAIN  → Optuna walk-forward CV runs entirely here
+├── 15% VALID  → Confidence threshold tuned here (larger = less threshold overfit)
+└── 15% TEST   → Honest backtest — untouched until the very end
 ```
 
-The test set is **never used** during training or threshold tuning. This prevents the common mistake of optimising on test data and reporting inflated results.
+**Why 70/15/15 instead of 80/10/10:**
+- Larger valid set (15% vs 10%) → threshold Optuna has more data → less chance of picking 0.69 vs 0.70 by noise
+- Larger test set (15% vs 10%) → ~217 samples instead of 145 → WR estimate is more statistically reliable
+
+**Annual walk-forward validation gate:**
+
+After training, the model is tested independently on each of the last 3 calendar years:
+
+```
+Year 2023 → test on that year's 15% holdout → WR = X%  ✔/✘
+Year 2024 → test on that year's 15% holdout → WR = Y%  ✔/✘
+Year 2025 → test on that year's 15% holdout → WR = Z%  ✔/✘
+
+Model saved ONLY IF majority of years pass the 55% WR gate.
+```
+
+**Why this matters:** A global 70/15/15 trains on 2017-2023 and tests once on 2025/2026. AAPL in 2019 behaves very differently from AAPL in 2025 (different volatility, sector, market regime). Annual testing ensures the model works across multiple market environments, not just one lucky period.
+
+**Minimum WR requirement:**
+- Default: **55% WR** (configurable via `--min-wr 0.55`)
+- At 1.5:1 R:R, 55% WR = +0.475R edge — meaningfully profitable
+- Below 55% = model rejected, not saved, user told to retrain
+- Use `--force-save` to bypass the gate (e.g. for research purposes)
+
+```bash
+# Standard: rejects if < 55% WR in majority of last 3 years
+python train.py --csv data/AAPL_*.csv
+
+# Custom threshold: require 60% WR
+python train.py --csv data/AAPL_*.csv --min-wr 0.60
+
+# Override gate for research
+python train.py --csv data/AAPL_*.csv --force-save
+```
 
 ### The Model (train.py)
 - XGBoost binary classifier: predicts LONG (1) vs SHORT (0)

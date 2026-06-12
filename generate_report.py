@@ -447,8 +447,9 @@ def main():
     # Load + prepare data for test set evaluation and report
     df, _ = load_and_prepare(args.csv)
     n = len(df)
-    train_df = df[:int(n * 0.80)]
-    test_df  = df[int(n * 0.90):].reset_index(drop=True)
+    # 70/15/15 split — must match train.py exactly
+    train_df = df[:int(n * 0.70)]
+    test_df  = df[int(n * 0.85):].reset_index(drop=True)
     print(f"Test set: {len(test_df)} samples ({test_df.iloc[0]['Date'][:10]} → {test_df.iloc[-1]['Date'][:10]})")
 
     X_test = test_df[feature_cols].values
