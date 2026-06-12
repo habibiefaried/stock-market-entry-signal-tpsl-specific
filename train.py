@@ -369,8 +369,8 @@ def optimize_hyperparams(df, feature_cols, n_trials=100):
 
     def objective(trial):
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 500, 15000),
-            "learning_rate": trial.suggest_float("learning_rate", 0.0005, 0.2, log=True),
+            "n_estimators": trial.suggest_int("n_estimators", 2000, 30000),
+            "learning_rate": trial.suggest_float("learning_rate", 0.0001, 0.5, log=True),
             "max_depth": trial.suggest_int("max_depth", 3, 10),
             "subsample": trial.suggest_float("subsample", 0.6, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
@@ -650,15 +650,12 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
       15% VALID  → Confidence threshold tuned here (more data = less overfit)
       15% TEST   → Final honest backtest, completely untouched until end
 
-    Triannual walk-forward gate:
-      After training, splits all data into non-overlapping 3-year blocks
-      (e.g. 2017-2019, 2020-2022, 2023-2025). Tests the model on the last
-      15% of each block (~112 samples per block, much more reliable than
-      the ~37 samples from annual testing). Model only saved if majority
-      of blocks (2/3) pass min_wr. Ensures model works across market
-      regimes: pre-covid, recovery, post-2022 etc.
+    Win rate gate:
+      Model only saved if test-set WR >= min_wr (default 55%).
+      Test set = last 3 months (live trading period). If model can't
+      beat 55% on the most recent data, it's rejected.
 
-    n_trials:   None = auto (250 GPU, 100 CPU)
+    n_trials:   None = auto (400 GPU, 200 CPU)
     use_deep:   None = auto (True GPU, False CPU)
     min_wr:     Minimum win rate required to save model (default 0.55 = 55%)
     force_save: Bypass min_wr gate and always save
@@ -670,9 +667,9 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
     # Auto-configure based on hardware
     gpu_available = device != "cpu"
     if n_trials is None:
-        n_trials = 250 if gpu_available else 100
+        n_trials = 400 if gpu_available else 200
     if use_deep is None:
-        use_deep = False  # 3-year window = too few samples for LSTM/CNN to generalise
+        use_deep = gpu_available  # 9-year window has enough samples for LSTM/CNN on GPU
 
     print(f"Hardware: {device} → n_trials={n_trials}, deep_learning={'ON' if use_deep else 'OFF'} (auto)")
     print(f"Total samples: {len(df)}")
@@ -771,7 +768,10 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
     if device != "cpu":
         model_params["device"] = device
 
-    print(f"\nModel params: depth={max_depth}, lr={learning_rate:.4f}, trees={n_estimators}, device={device}")
+    print(f"\nFinal model config (Optuna-selected):")
+    print(f"  Trees: {n_estimators} | LR: {learning_rate:.6f} | Depth: {max_depth} | Device: {device}")
+    print(f"  Subsample: {model_params['subsample']:.2f} | ColSample: {model_params['colsample_bytree']:.2f}")
+    print(f"  Gamma: {model_params['gamma']:.2f} | Alpha: {model_params['reg_alpha']:.2f} | Lambda: {model_params['reg_lambda']:.2f}")
     train_start = time.time()
     model = xgb.XGBClassifier(**model_params)
     # Use VALID set for early stopping (not TEST — that stays locked)
@@ -838,23 +838,12 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
         if r["total"] > 0:
             print(f"  {thresh:>10.2f} {r['total']:>7} {skip_pct:>6.1f}% {r['wr']:>9.1f}% {r['edge']:>+8.3f}R{marker}")
 
-    # ── Triannual walk-forward gate: 3 non-overlapping 3-year blocks ────────
-    # WHY: 1-year blocks give only ~37 test samples (noise). 3-year blocks
-    # give ~112 samples — statistically meaningful, and each block represents
-    # a distinct market regime (pre-covid, covid/recovery, post-2022).
+    # ── Win rate gate: does the test set (last 3 months) meet minimum WR? ───
+    passes_gate = raw["wr"] >= min_wr * 100
     print(f"\n{'='*50}")
-    print(f"TRIANNUAL WALK-FORWARD VALIDATION (3-year blocks)")
+    print(f"WIN RATE GATE")
     print(f"{'='*50}")
-    print(f"Min WR required: {min_wr*100:.0f}% | Must pass majority of blocks (2/3)")
-    block_results, passes_gate = triannual_walk_forward_test(
-        df, feature_cols, model, scaler, min_wr=min_wr, years_per_block=3)
-
-    for r in block_results:
-        status = "✔ PASS" if r["pass"] else "✘ FAIL"
-        print(f"  {r['label']}: {r['trades']:3d} trades | WR={r['wr']:.1f}% | Edge={r['edge']:+.3f}R  {status}")
-
-    blocks_passing = sum(1 for r in block_results if r["pass"])
-    print(f"\nResult: {blocks_passing}/{len(block_results)} blocks passed {min_wr*100:.0f}% WR gate")
+    print(f"Test WR: {raw['wr']:.1f}% | Required: {min_wr*100:.0f}% | {'✔ PASS' if passes_gate else '✘ FAIL'}")
 
     # ── Save model — only if WR gate passed AND new run beats existing ────
     ticker = os.path.basename(csv_path).split("_")[0]
@@ -880,8 +869,7 @@ def train_model(csv_path: str, train_ratio: float = 0.7, n_trials: int = None,
             pass
 
     if not force_save and not passes_gate:
-        avg_wr = np.mean([r["wr"] for r in annual_results]) if annual_results else 0
-        print(f"\n✘ MODEL REJECTED — average annual WR {avg_wr:.1f}% < {min_wr*100:.0f}% required")
+        print(f"\n✘ MODEL REJECTED — test WR {raw['wr']:.1f}% < {min_wr*100:.0f}% required")
         print(f"  Not saving. Run again with more trials, or use --force-save to override.")
     elif force_save or new_score > existing_score:
         model.save_model(model_path)

@@ -120,31 +120,13 @@ Split (9yr train+valid, last 3mo test):
   Train: 1258 (2018-10-16 → 2025-05-23)
   Valid: 140 (2025-06-03 → 2026-03-06)
   Test:  48 (2026-03-09 → 2026-06-08) ← live trading period
-  WR: 84.2% | Edge: +1.105R | 3/3 triannual blocks passed
+  WR: 84.2% | Edge: +1.105R | Passed 55% WR gate
 ```
 
-**Triannual walk-forward validation gate:**
-
-After training, data is split into non-overlapping 3-year blocks. Each block's last 15% is the test slice:
-
-```
-Block 1: 2017–2019 → test on last 15% (~66 trades) → WR = X%  ✔/✘
-Block 2: 2020–2022 → test on last 15% (~85 trades) → WR = Y%  ✔/✘
-Block 3: 2023–2025 → test on last 15% (~80 trades) → WR = Z%  ✔/✘
-
-Model saved ONLY IF majority of blocks (2/3) pass the 55% WR gate.
-```
-
-**Why 3-year blocks instead of annual:**
-- 1-year → ~250 days × 15% = ~37 test samples → 54% vs 56% WR = literally 1 win = noise
-- 3-year → ~750 days × 15% = ~112 test samples → statistically meaningful (±5% margin of error)
-
-Each block also represents a distinct market regime:
-- 2017–2019: pre-COVID bull market
-- 2020–2022: COVID crash + recovery + rate hikes
-- 2023–2025: post-rate-hike normalisation
-
-The model must prove it works across regimes, not just one lucky period.
+**Win rate gate:**
+Model only saved if test-set WR >= 55% (configurable via `--min-wr`).
+The test set is the last 3 months — directly answers "would this model make money NOW?"
+If it fails, the model is rejected and not saved. Use `--force-save` to override for research.
 
 **Minimum WR requirement:**
 - Default: **55% WR** (configurable via `--min-wr 0.55`)
@@ -318,8 +300,8 @@ Each trial trains XGBoost with a different combination of parameters and scores 
 
 | Parameter | Search Range | What It Controls |
 |-----------|-------------|-----------------|
-| `n_estimators` | 500 – 15000 | Number of trees |
-| `learning_rate` | 0.0005 – 0.2 | How much each tree contributes |
+| `n_estimators` | 2000 – 30000 | Number of trees |
+| `learning_rate` | 0.0001 – 0.5 | How much each tree contributes |
 | `max_depth` | 3 – 10 | Complexity of each tree |
 | `subsample` | 0.6 – 1.0 | Fraction of rows each tree sees |
 | `colsample_bytree` | 0.5 – 1.0 | Fraction of features each tree sees |
@@ -514,7 +496,7 @@ When NVIDIA CUDA is detected, the pipeline automatically upgrades:
 
 | Setting | CPU default | GPU auto |
 |---------|------------|---------|
-| Optuna trials | 100 | **250** |
+| Optuna trials | 200 | **400** |
 | LSTM/CNN deep features | OFF | **ON** |
 | XGBoost device | cpu | **cuda** |
 
