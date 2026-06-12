@@ -9,19 +9,22 @@ import os
 import argparse
 import warnings
 from datetime import datetime
-from train import load_and_prepare, optimize_hyperparams, detect_gpu, generate_deep_features
+from train import (load_and_prepare, optimize_hyperparams, detect_gpu,
+                   generate_deep_features, _backtest_at_threshold, _find_best_threshold_optuna)
 
 # Suppress XGBoost device-mismatch warning (numpy arrays on CPU auto-converted
 # to CUDA DMatrix — harmless performance hint, not a correctness issue)
 warnings.filterwarnings("ignore", message=".*mismatched devices.*")
 
 
-def backtest(df, y_pred, y_prob):
-    """Run backtest on predictions: simulate trades with 1.5:1 R:R."""
+def backtest(df, y_pred, y_prob, threshold=0.0):
+    """Run trader-style backtest: only enter trades where confidence >= threshold."""
     trades = []
     for idx, (_, row) in enumerate(df.iterrows()):
         pred = y_pred[idx]
         prob = y_prob[idx][pred]
+        if prob < threshold:
+            continue
         direction = "LONG" if pred == 1 else "SHORT"
 
         if direction == "LONG":
@@ -118,8 +121,11 @@ def generate_html(ticker, trades, mc_results, model_metrics, latest_prediction, 
     # Latest prediction
     direction = latest_prediction["direction"]
     confidence = latest_prediction["confidence"]
-    verdict_color = "#22c55e" if direction == "LONG" else "#ef4444"
+    tradeable = latest_prediction.get("tradeable", True)
+    best_threshold = latest_prediction.get("threshold", 0.50)
+    verdict_color = "#22c55e" if (direction == "LONG" and tradeable) else ("#ef4444" if direction == "SHORT" and tradeable else "#64748b")
     verdict_emoji = "&#9650;" if direction == "LONG" else "&#9660;"
+    trade_badge = f'<span style="background:#22c55e22;color:#22c55e;padding:4px 12px;border-radius:4px;font-size:0.85rem">&#10004; TRADE (conf {confidence:.1f}% &ge; {best_threshold*100:.0f}%)</span>' if tradeable else f'<span style="background:#ef444422;color:#ef4444;padding:4px 12px;border-radius:4px;font-size:0.85rem">&#10008; SKIP (conf {confidence:.1f}% &lt; {best_threshold*100:.0f}%)</span>'
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -172,6 +178,7 @@ def generate_html(ticker, trades, mc_results, model_metrics, latest_prediction, 
             <h2>TODAY'S VERDICT</h2>
             <div class="verdict-direction">{verdict_emoji} {direction}</div>
             <div class="verdict-confidence">Confidence: {confidence:.1f}%</div>
+            <div style="margin-top: 10px;">{trade_badge}</div>
             <p style="margin-top: 12px; color: #94a3b8; font-size: 0.9rem;">
                 Date: {latest_prediction['date']} | Close: ${latest_prediction['close']:.2f}
             </p>
@@ -246,7 +253,7 @@ def generate_html(ticker, trades, mc_results, model_metrics, latest_prediction, 
                 <div class="stat-value">{model_metrics['precision_short']:.1f}%</div>
             </div>
             <div class="stat">
-                <div class="stat-label">Expected Edge</div>
+                <div class="stat-label">Expected Edge (@ conf≥{model_metrics['threshold']*100:.0f}%)</div>
                 <div class="stat-value {'positive' if model_metrics['edge'] > 0 else 'negative'}">{model_metrics['edge']:+.3f}R/trade</div>
             </div>
         </div>
@@ -408,25 +415,31 @@ def main():
     print(f"Training model for {ticker} ({model_label})...")
     print(f"Samples: {len(df)} | Features: {len(feature_cols)} | Device: {device}")
 
-    # Optuna tuning (mandatory)
-    best_params = optimize_hyperparams(df, feature_cols, args.n_trials)
+    # ── 3-way chronological split (same as train.py, no leakage) ─────────
+    n = len(df)
+    train_end = int(n * 0.80)
+    valid_end = int(n * 0.90)
+    train_df = df[:train_end]
+    valid_df = df[train_end:valid_end].reset_index(drop=True)
+    test_df  = df[valid_end:].reset_index(drop=True)
+    print(f"Split: Train={len(train_df)} | Valid={len(valid_df)} | Test={len(test_df)}")
+
+    # Optuna tuning on TRAIN only
+    best_params = optimize_hyperparams(train_df, feature_cols, args.n_trials)
     n_estimators = best_params.pop("n_estimators")
     learning_rate = best_params.pop("learning_rate")
     max_depth = best_params.pop("max_depth")
 
-    # Chronological split
-    split_idx = int(len(df) * args.train_ratio)
-    train_df = df[:split_idx]
-    test_df = df[split_idx:].reset_index(drop=True)
-
     X_train = train_df[feature_cols].values
     y_train = train_df["TARGET"].values
-    X_test = test_df[feature_cols].values
-    y_test = test_df["TARGET"].values
+    X_valid = valid_df[feature_cols].values
+    X_test  = test_df[feature_cols].values
+    y_test  = test_df["TARGET"].values
 
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
+    X_valid_scaled = scaler.transform(X_valid)
+    X_test_scaled  = scaler.transform(X_test)
 
     n_long = y_train.sum()
     n_short = len(y_train) - n_long
@@ -452,22 +465,29 @@ def main():
         model_params["device"] = device
 
     model = xgb.XGBClassifier(**model_params)
-    model.fit(X_train_scaled, y_train, eval_set=[(X_test_scaled, y_test)], verbose=False)
+    model.fit(X_train_scaled, y_train, eval_set=[(X_valid_scaled, valid_df["TARGET"].values)], verbose=False)
 
-    # Predictions on test set
+    # Predictions
+    y_pred_valid = model.predict(X_valid_scaled)
+    y_prob_valid = model.predict_proba(X_valid_scaled)
     y_pred = model.predict(X_test_scaled)
     y_prob = model.predict_proba(X_test_scaled)
+
+    # Optimise confidence threshold on VALID (never on test)
+    best_threshold, _ = _find_best_threshold_optuna(valid_df, y_pred_valid, y_prob_valid, n_trials=40)
 
     accuracy = accuracy_score(y_test, y_pred) * 100
     prec_long = precision_score(y_test, y_pred, pos_label=1, zero_division=0) * 100
     prec_short = precision_score(y_test, y_pred, pos_label=0, zero_division=0) * 100
 
-    # Run backtest
-    print("Running backtest...")
-    trades = backtest(test_df, y_pred, y_prob)
-    wins = sum(1 for t in trades if t["hit_tp"])
-    win_rate = wins / len(trades)
-    edge = win_rate * 1.5 - (1 - win_rate) * 1.0
+    # Run trader-style backtest at optimised threshold
+    print(f"Running backtest (confidence threshold: {best_threshold:.2f})...")
+    bt = _backtest_at_threshold(test_df, y_pred, y_prob, best_threshold)
+    win_rate = bt["wr"] / 100
+    edge = bt["edge"]
+
+    # Build trades list for equity curve + Monte Carlo (at optimised threshold)
+    trades = backtest(test_df, y_pred, y_prob, threshold=best_threshold)
 
     # Monte Carlo
     print(f"Running Monte Carlo ({args.mc_simulations:,} simulations)...")
@@ -481,6 +501,7 @@ def main():
     X_latest = scaler.transform(df[feature_cols].iloc[[-1]].values)
     pred_latest = model.predict(X_latest)[0]
     prob_latest = model.predict_proba(X_latest)[0]
+    tradeable = prob_latest[pred_latest] >= best_threshold
     latest_prediction = {
         "direction": "LONG" if pred_latest == 1 else "SHORT",
         "confidence": prob_latest[pred_latest] * 100,
@@ -488,6 +509,8 @@ def main():
         "p_short": prob_latest[0] * 100,
         "date": df.iloc[-1]["Date"],
         "close": df.iloc[-1]["Close"],
+        "threshold": best_threshold,
+        "tradeable": tradeable,
     }
 
     model_metrics = {
@@ -495,6 +518,7 @@ def main():
         "precision_long": prec_long,
         "precision_short": prec_short,
         "edge": edge,
+        "threshold": best_threshold,
         "train_samples": len(train_df),
         "test_samples": len(test_df),
         "n_features": len(feature_cols),

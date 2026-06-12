@@ -292,12 +292,27 @@ Tested on AAPL, NFLX, AMD (9 years data, 100 Optuna trials each):
 | **RVI_Vol (Relative Volatility Index)** | RSI applied to std deviation | High = volatile days dominate; helps regime detection |
 
 ### The Report (generate_report.py)
-- Trains model with Optuna (same mandatory tuning as `train.py`)
-- Runs backtest on test set, then runs 10,000 Monte Carlo simulations
-- Generates interactive HTML with Chart.js visualizations
-- Shows: verdict, equity curve, MC probability distribution, feature importance
+- Uses same 3-way split as `train.py` (80% train / 10% valid / 10% test, no leakage)
+- Optuna tunes hyperparameters on train, confidence threshold on valid
+- Backtest runs at Optuna-tuned threshold (trader-style: skip signals below threshold)
+- Runs 10,000 Monte Carlo simulations on filtered trades
+- HTML verdict card shows ✔ TRADE or ✘ SKIP based on threshold
+- Shows: threshold-aware verdict, equity curve, MC, feature importance
 
 ### Live Decision (current.py)
+Loads the saved confidence threshold from `models/{TICKER}_*_threshold.txt` (written by `train.py` / `generate_report.py`) and shows whether today's signal clears it:
+```
+VERDICT:    ▲ LONG
+Confidence: 52.3%  →  ✔ TRADE
+Threshold:  52% (Optuna-tuned on validation set)
+```
+or:
+```
+VERDICT:    ▼ SHORT
+Confidence: 48.1%  →  ✘ SKIP (below threshold 0.62)
+```
+
+### Live Decision (current.py) — Details
 
 **Why you only need to supply a current price:**
 
